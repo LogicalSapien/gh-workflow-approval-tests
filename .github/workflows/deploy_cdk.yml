@@ -1,103 +1,299 @@
 name: ⚙️ Deploy CDK
 
 on:
-  # ✅ workflow_call only - no workflow_dispatch
+  # -----------------------------------------------------------------------
+  # workflow_call ONLY - no workflow_dispatch
+  # Mirrors what your _deploy_cdk.yaml should look like after the fix
   # Cannot be triggered directly, only via pipeline.yml
-  # which is only callable via orchestrator.yml
-  # Full call chain: orchestrator → pipeline → deploy_cdk
-  # Approval gate lives in orchestrator, so this is secure
+  # -----------------------------------------------------------------------
   workflow_call:
     inputs:
-      ag:
-        description: Target account group
+      # -----------------------------------------------------------------------
+      # All inputs mirror your real _deploy_cdk.yaml exactly
+      # -----------------------------------------------------------------------
+      cdk_app_directory:
+        description: Absolute path for CDK app file
+        required: true
+        type: string
+
+      cdk_stack:
+        description: The CDK stack to deploy
         required: true
         type: string
 
       environment:
-        description: The environment level
+        description: The AWS environment level (dev/tst/prd)
         required: true
         type: string
+        # -----------------------------------------------------------------------
+        # NOTE: this input called "environment" is just a STRING
+        # it is NOT the job-level environment: declaration
+        # it flows through to CDK commands, conditionals, audit steps
+        # exactly like your real workflow
+        # it does NOT cause any approval gate
+        # -----------------------------------------------------------------------
 
-      stack:
-        description: The stack to deploy
-        required: true
+      ag:
+        description: Target account group
+        required: false
         type: string
 
-      tag:
-        description: Git tag to deploy
-        required: true
+      aws_region:
+        description: AWS region override
+        required: false
+        type: string
+
+      aws_role:
+        description: The AWS role to deploy as
+        default: default-build-role
+        required: false
         type: string
 
       diff:
-        description: Run CDK diff?
+        description: CDK DIFF?
         required: false
         type: boolean
         default: false
 
       destroy:
-        description: Run CDK destroy?
+        description: CDK DESTROY?
         required: false
         type: boolean
         default: false
 
       deploy:
-        description: Run CDK deploy?
+        description: CDK DEPLOY?
         required: false
         type: boolean
         default: true
 
+      snyk_continue_on_error:
+        description: Continue if snyk finds vulnerabilities?
+        required: false
+        type: boolean
+        default: false
+
+      github_ref:
+        description: Git ref to deploy
+        required: false
+        type: string
+        default: main
+
+      cdk_config:
+        description: Optional CDK config file
+        required: false
+        type: string
+
+    secrets:
+      MY_PAT_TOKEN:
+        description: GitHub PAT token
+        required: false
+      MY_JIRA_TOKEN:
+        description: Jira API token
+        required: false
+
 jobs:
   deploy:
-    name: ${{ inputs.stack }} → ${{ inputs.ag }}-${{ inputs.environment }}
     runs-on: ubuntu-latest
-    # ✅ NO environment: here
-    # Approval already granted at orchestrator approval-gate
-    # This job is not directly triggerable (no workflow_dispatch above)
-    # so there is no security hole from removing environment:
+    name: ${{ inputs.cdk_stack }} → ${{ inputs.ag }} ${{ inputs.environment }}
+
+    # -------------------------------------------------------------------------
+    # ⚠️  THIS IS THE LINE THAT CAUSES YOUR PROBLEM
+    #
+    # PHASE 1 (reproduce the bug): uncomment the line below
+    # environment: ${{ inputs.environment }}
+    #
+    # PHASE 2 (test the fix): comment it out or delete it
+    # The input variable called "environment" still flows through fine
+    # All CDK commands, conditionals, audit steps work exactly the same
+    # The ONLY thing that changes is no approval gate fires here
+    # -------------------------------------------------------------------------
+    # environment: ${{ inputs.environment }}
+
+    env:
+      # -----------------------------------------------------------------------
+      # These mirror your real _deploy_cdk.yaml env block exactly
+      # All of these still work perfectly without job-level environment:
+      # They are just variables, completely unrelated to approval gates
+      # -----------------------------------------------------------------------
+      CDK_APP_DIRECTORY: ${{ inputs.cdk_app_directory }}
+      CDK_CONFIG: ${{ inputs.cdk_config }}
+      CDK_STACK: ${{ inputs.cdk_stack }}
+      ENVIRONMENT: ${{ inputs.environment }}        # ← just a string "prd"
+      AWS_ACCOUNT_GROUP: ${{ inputs.ag }}
+      AWS_ROLE: ${{ inputs.aws_role }}
+      CDK_DISABLE_CLI_TELEMETRY: '1'
 
     permissions:
       id-token: write
       contents: write
 
     steps:
-      - name: Show deployment info
+      # Mirrors your real Show Workflow Inputs step
+      - name: Show Workflow Inputs
         run: |
-          echo "### 🔍 Deployment Info" >> $GITHUB_STEP_SUMMARY
-          echo "| Field       | Value                         |" >> $GITHUB_STEP_SUMMARY
-          echo "| ----------- | ----------------------------- |" >> $GITHUB_STEP_SUMMARY
-          echo "| AG          | ${{ inputs.ag }}              |" >> $GITHUB_STEP_SUMMARY
-          echo "| Environment | ${{ inputs.environment }}     |" >> $GITHUB_STEP_SUMMARY
-          echo "| Stack       | ${{ inputs.stack }}           |" >> $GITHUB_STEP_SUMMARY
-          echo "| Tag         | ${{ inputs.tag }}             |" >> $GITHUB_STEP_SUMMARY
-          echo "| Diff        | ${{ inputs.diff }}            |" >> $GITHUB_STEP_SUMMARY
-          echo "| Destroy     | ${{ inputs.destroy }}         |" >> $GITHUB_STEP_SUMMARY
-          echo "| Deploy      | ${{ inputs.deploy }}          |" >> $GITHUB_STEP_SUMMARY
+          {
+            echo "### Workflow inputs"
+            echo "| Input             | Value                           |"
+            echo "| ----------------- | ------------------------------- |"
+            echo "| Environment       | ${{ inputs.environment }}       |"
+            echo "| Account Group     | ${{ inputs.ag }}                |"
+            echo "| cdk_app_directory | ${{ inputs.cdk_app_directory }} |"
+            echo "| Stack name        | ${{ inputs.cdk_stack }}         |"
+            echo "| Diff              | ${{ inputs.diff }}              |"
+            echo "| Destroy           | ${{ inputs.destroy }}           |"
+            echo "| Deploy            | ${{ inputs.deploy }}            |"
+            echo "| github_ref        | ${{ inputs.github_ref }}        |"
+            echo "| AWS Role          | ${{ inputs.aws_role }}          |"
+            echo "| AWS Region        | ${{ inputs.aws_region }}        |"
+          } >> $GITHUB_STEP_SUMMARY
 
-      - name: Simulate CDK diff
+      # Mirrors your real Checkout step
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # Mirrors your real Parse account info step
+      - name: Parse account info
+        run: |
+          echo "🔍 Parsing account info"
+          echo "   AG  : ${{ env.AWS_ACCOUNT_GROUP }}"
+          echo "   Env : ${{ env.ENVIRONMENT }}"
+          # In your real workflow this calls lookup_aws_account_env action
+          # which sets AWS_ACCOUNT_ID and AWS_REGION from the registry JSON
+          # Simulating those outputs here
+          echo "AWS_ACCOUNT_ID=123456789012" >> $GITHUB_ENV
+          echo "AWS_REGION=eu-west-1"        >> $GITHUB_ENV
+          echo "CMDB_APP_SYS_ID=SYS001"      >> $GITHUB_ENV
+
+      # Mirrors your real Derive AWS CDK details step
+      - name: Derive CDK details
+        run: |
+          STACK_NAME="${{ env.CDK_STACK }}"
+
+          if [ -n "${{ inputs.aws_region }}" ]; then
+            echo "AWS_REGION=${{ inputs.aws_region }}" >> $GITHUB_ENV
+          fi
+
+          if [[ "$STACK_NAME" != *"/"* ]]; then
+            PREFIXED_CDK_STACK="**/${STACK_NAME}"
+          else
+            PREFIXED_CDK_STACK="$STACK_NAME"
+          fi
+
+          if [[ -n "${CDK_CONFIG:-}" ]]; then
+            dir="$(dirname "$CDK_APP_DIRECTORY")"
+            CDK_CONFIG_PATH="$dir/$CDK_CONFIG"
+            echo "CDK_CONFIG_PATH=$CDK_CONFIG_PATH" >> "$GITHUB_ENV"
+          fi
+
+          echo "AWS_ACCOUNT_ID=$AWS_ACCOUNT_ID" >> $GITHUB_ENV
+          echo "AWS_REGION=$AWS_REGION"          >> $GITHUB_ENV
+          echo "CMDB_APP_SYS_ID=$CMDB_APP_SYS_ID" >> $GITHUB_ENV
+          echo "PREFIXED_CDK_STACK=$PREFIXED_CDK_STACK" >> $GITHUB_ENV
+
+          echo "CDK stack will be: $PREFIXED_CDK_STACK"
+
+      # Mirrors your real Configure AWS Credentials step
+      - name: Configure AWS Credentials
+        run: |
+          echo "🔑 Assuming role"
+          echo "   Role    : arn:aws:iam::${{ env.AWS_ACCOUNT_ID }}:role/${{ env.AWS_ROLE }}"
+          echo "   Region  : ${{ env.AWS_REGION }}"
+          sleep 1
+          echo "✅ AWS credentials configured"
+          # In your real workflow this is:
+          # uses: aws-actions/configure-aws-credentials@v4
+
+      # Mirrors your real CDK Diff step
+      - name: CDK Diff
         if: ${{ inputs.diff }}
         run: |
-          echo "📊 Running CDK diff"
-          echo "   Stack : ${{ inputs.stack }}"
-          echo "   AG    : ${{ inputs.ag }}"
+          echo "📊 CDK Diff"
+          echo "   cdk diff --app 'python ${{ env.CDK_APP_DIRECTORY }}'"
+          echo "            --context environment=${{ env.ENVIRONMENT }}"
+          echo "            --context aws_account_group=${{ env.AWS_ACCOUNT_GROUP }}"
+          echo "            --context sys_id=${{ env.CMDB_APP_SYS_ID }}"
+          echo "            --role-arn arn:aws:iam::${{ env.AWS_ACCOUNT_ID }}:role/${{ env.AWS_ROLE }}"
+          echo "            ${{ env.PREFIXED_CDK_STACK }}"
           sleep 2
           echo "✅ Diff complete"
 
-      - name: Simulate CDK deploy
-        if: ${{ inputs.deploy }}
-        run: |
-          echo "🚀 Running CDK deploy"
-          echo "   Stack       : ${{ inputs.stack }}"
-          echo "   AG          : ${{ inputs.ag }}"
-          echo "   Environment : ${{ inputs.environment }}"
-          echo "   Tag         : ${{ inputs.tag }}"
-          sleep 5
-          echo "✅ Deploy complete"
-
-      - name: Simulate CDK destroy
+      # Mirrors your real CDK Destroy step
+      - name: CDK Destroy
         if: ${{ inputs.destroy }}
         run: |
-          echo "💥 Running CDK destroy"
-          echo "   Stack : ${{ inputs.stack }}"
-          echo "   AG    : ${{ inputs.ag }}"
+          echo "💥 CDK Destroy"
+          echo "   cdk destroy --app 'python ${{ env.CDK_APP_DIRECTORY }}'"
+          echo "               --context environment=${{ env.ENVIRONMENT }}"
+          echo "               --context aws_account_group=${{ env.AWS_ACCOUNT_GROUP }}"
+          echo "               ${{ env.PREFIXED_CDK_STACK }}"
           sleep 2
           echo "✅ Destroy complete"
+
+      # Mirrors your real CDK Deploy step
+      - name: CDK Deploy
+        if: ${{ inputs.deploy }}
+        id: deploy
+        run: |
+          echo "🚀 CDK Deploy"
+          echo "   cdk deploy --app 'python ${{ env.CDK_APP_DIRECTORY }}'"
+          echo "              --context environment=${{ env.ENVIRONMENT }}"
+          echo "              --context aws_account_group=${{ env.AWS_ACCOUNT_GROUP }}"
+          echo "              --context sys_id=${{ env.CMDB_APP_SYS_ID }}"
+          echo "              --require-approval never"
+          echo "              --exclusively"
+          echo "              --role-arn arn:aws:iam::${{ env.AWS_ACCOUNT_ID }}:role/${{ env.AWS_ROLE }}"
+          echo "              --concurrency 10"
+          echo "              ${{ env.PREFIXED_CDK_STACK }}"
+          sleep 5
+          echo "✅ Deploy complete"
+          DEPLOY_TS=$(date +%Y-%m-%dT%H:%M:%S)
+          echo "DEPLOY_TS=$DEPLOY_TS" >> $GITHUB_OUTPUT
+
+      # Mirrors your real prd-only audit step
+      - name: Run Audit Report
+        if: ${{ inputs.deploy && inputs.environment == 'prd' }}
+        continue-on-error: true
+        run: |
+          echo "📋 Generating audit report for prd deployment"
+          echo "   Stack  : ${{ inputs.cdk_stack }}"
+          echo "   AG     : ${{ inputs.ag }}"
+          echo "   Tag    : ${{ inputs.github_ref }}"
+          echo "   Env    : ${{ inputs.environment }}"
+          echo "   Ts     : ${{ steps.deploy.outputs.DEPLOY_TS }}"
+          sleep 1
+          echo "✅ Audit report generated"
+          # In your real workflow this runs: generate_audit_report
+
+      # Mirrors your real prd-only upload step
+      - name: Upload Audit Report
+        if: ${{ inputs.deploy && inputs.environment == 'prd' }}
+        continue-on-error: true
+        run: |
+          echo "📤 Uploading audit report to release"
+          echo "   File : aws_release_report.csv"
+          echo "✅ Uploaded"
+          # In your real workflow: gh release upload $ref $filename
+
+      # Mirrors your real prd-only release note step
+      - name: Create release note for prd deployments
+        if: ${{ inputs.deploy && inputs.environment == 'prd' }}
+        continue-on-error: true
+        run: |
+          echo "📝 Creating release note"
+          echo "   AG    : ${{ inputs.ag }}"
+          echo "   Stack : ${{ inputs.cdk_stack }}"
+          echo "   Env   : ${{ inputs.environment }}"
+          sleep 1
+          echo "✅ Release note created"
+
+      - name: Deploy CDK summary
+        run: |
+          echo "### ⚙️ CDK Deploy Summary" >> $GITHUB_STEP_SUMMARY
+          echo "| Field       | Value                             |" >> $GITHUB_STEP_SUMMARY
+          echo "| ----------- | --------------------------------- |" >> $GITHUB_STEP_SUMMARY
+          echo "| AG          | ${{ inputs.ag }}                  |" >> $GITHUB_STEP_SUMMARY
+          echo "| Environment | ${{ inputs.environment }}         |" >> $GITHUB_STEP_SUMMARY
+          echo "| Stack       | ${{ inputs.cdk_stack }}           |" >> $GITHUB_STEP_SUMMARY
+          echo "| Tag         | ${{ inputs.github_ref }}          |" >> $GITHUB_STEP_SUMMARY
+          echo "| Deployed at | $(date -u '+%Y-%m-%d %H:%M UTC') |" >> $GITHUB_STEP_SUMMARY
