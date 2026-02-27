@@ -78,10 +78,10 @@ jobs:
                 continue
               fi
 
-              # Escalate gate env - prd beats tst beats dev
-              if [[ "$env" == "prd" ]]; then
+              # with this:
+              if [[ "$env" == "prd" || "$env" == "prod" ]]; then
                 GATE_ENV="prd"
-              elif [[ "$env" == "tst" && "$GATE_ENV" != "prd" ]]; then
+              elif [[ ( "$env" == "tst" || "$env" == "tst" ) && "$GATE_ENV" != "prd" ]]; then
                 GATE_ENV="tst"
               fi
 
