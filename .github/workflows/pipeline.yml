@@ -1,20 +1,30 @@
 name: 🔧 Pipeline
 
+run-name: >-
+  Deploy ${{ inputs.tag }}
+  to ${{ inputs.ag }}-${{ inputs.environment }}
+  by @${{ github.actor }}
+
 on:
-  # ✅ workflow_call only - no workflow_dispatch
-  # This means nobody can trigger this directly
+  # -----------------------------------------------------------------------
+  # workflow_call ONLY - no workflow_dispatch
+  # This mirrors what your deploy_release_aws_account.yaml should look like
+  # Nobody can trigger this directly from the GitHub UI
   # The only way in is via orchestrator.yml
-  # Therefore removing environment: from deploy_cdk.yml is safe
-  # because the only path to deploy_cdk goes through the orchestrator gate
+  # This is what makes removing environment: from deploy_cdk.yml safe
+  # -----------------------------------------------------------------------
   workflow_call:
     inputs:
       ag:
+        description: Account group to deploy to
         required: true
         type: string
       environment:
+        description: Target environment
         required: true
         type: string
       tag:
+        description: Git tag to deploy
         required: true
         type: string
 
@@ -24,38 +34,64 @@ concurrency:
 
 jobs:
 
+  # Mirrors your deploy-core job
   deploy-core:
     name: 🏗️ Core [${{ inputs.ag }}-${{ inputs.environment }}]
     uses: ./.github/workflows/deploy_cdk.yml
     with:
-      ag: ${{ inputs.ag }}
+      # mirrors your real inputs exactly
+      cdk_app_directory: src/cdk/core/app.py
+      cdk_stack: core-stack/**
       environment: ${{ inputs.environment }}
-      stack: "core-stack"
-      tag: ${{ inputs.tag }}
-      deploy: true
+      ag: ${{ inputs.ag }}
+      aws_role: core-build-role
+      cdk_config: main_config.yaml
       diff: false
       destroy: false
+      deploy: true
+      github_ref: ${{ inputs.tag }}
     secrets: inherit
 
+  # Mirrors your deploy-app job
   deploy-app:
     name: 📦 App [${{ inputs.ag }}-${{ inputs.environment }}]
     needs: deploy-core
     uses: ./.github/workflows/deploy_cdk.yml
     with:
-      ag: ${{ inputs.ag }}
+      cdk_app_directory: src/cdk/${{ inputs.ag }}/app.py
+      cdk_stack: app-stack/**
       environment: ${{ inputs.environment }}
-      stack: "app-stack"
-      tag: ${{ inputs.tag }}
-      deploy: true
+      ag: ${{ inputs.ag }}
+      aws_role: ${{ inputs.ag }}-build-role
+      cdk_config: main_config.yaml
       diff: false
       destroy: false
+      deploy: true
+      github_ref: ${{ inputs.tag }}
     secrets: inherit
 
+  # Mirrors your smoke-tests job
   smoke-tests:
     name: 🧪 Smoke Tests [${{ inputs.ag }}-${{ inputs.environment }}]
     needs: deploy-app
     runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
     steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag }}
+
+      - name: Simulate AWS credentials
+        run: |
+          echo "🔑 Configuring AWS credentials"
+          echo "   Role   : ${{ inputs.ag }}-build-role"
+          echo "   Region : us-east-1"
+          sleep 1
+          echo "✅ AWS credentials configured"
+
       - name: Run smoke tests
         run: |
           echo "🧪 Running smoke tests"
@@ -65,14 +101,18 @@ jobs:
           sleep 3
           echo "✅ Smoke tests passed"
 
+  # Mirrors your post-deploy job
+  # -----------------------------------------------------------------------
+  # NOTE: NO environment: here
+  # Your real post-deploy has environment: ${{ inputs.environment }}
+  # That is the second place causing extra approval prompts
+  # Removing it here is safe because approval already happened
+  # in the orchestrator approval-gate job
+  # -----------------------------------------------------------------------
   post-deploy:
     name: ✅ Post Deploy [${{ inputs.ag }}-${{ inputs.environment }}]
     needs: smoke-tests
     runs-on: ubuntu-latest
-    # ✅ prd-internal has NO protection rules
-    # Used only for deployment tracking in GitHub UI
-    # Real protection already happened at approval-gate in orchestrator
-    environment: ${{ inputs.environment == 'prd' && 'prd-internal' || inputs.environment }}
     outputs:
       env_name: ${{ steps.env.outputs.env_name }}
     steps:
@@ -83,12 +123,20 @@ jobs:
           CLEANED="${CLEANED#grp-}"
           echo "env_name=$CLEANED-${{ inputs.environment }}" >> $GITHUB_OUTPUT
 
+      - name: Save deployment version
+        run: |
+          echo "💾 Saving deployment record"
+          echo "   Version : ${{ inputs.tag }}"
+          echo "   AG      : ${{ inputs.ag }}"
+          echo "   Env     : ${{ inputs.environment }}"
+          sleep 1
+
       - name: Post deploy summary
         run: |
           echo "### ✅ Deployment Complete" >> $GITHUB_STEP_SUMMARY
-          echo "| Field       | Value                         |" >> $GITHUB_STEP_SUMMARY
-          echo "| ----------- | ----------------------------- |" >> $GITHUB_STEP_SUMMARY
-          echo "| AG          | ${{ inputs.ag }}              |" >> $GITHUB_STEP_SUMMARY
-          echo "| Environment | ${{ inputs.environment }}     |" >> $GITHUB_STEP_SUMMARY
-          echo "| Tag         | ${{ inputs.tag }}             |" >> $GITHUB_STEP_SUMMARY
+          echo "| Field       | Value                             |" >> $GITHUB_STEP_SUMMARY
+          echo "| ----------- | --------------------------------- |" >> $GITHUB_STEP_SUMMARY
+          echo "| AG          | ${{ inputs.ag }}                  |" >> $GITHUB_STEP_SUMMARY
+          echo "| Environment | ${{ inputs.environment }}         |" >> $GITHUB_STEP_SUMMARY
+          echo "| Tag         | ${{ inputs.tag }}                 |" >> $GITHUB_STEP_SUMMARY
           echo "| Deployed at | $(date -u '+%Y-%m-%d %H:%M UTC') |" >> $GITHUB_STEP_SUMMARY
