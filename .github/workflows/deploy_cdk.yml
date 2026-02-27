@@ -1,33 +1,63 @@
 name: ⚙️ Deploy CDK
 
 on:
+  # ✅ workflow_call only - no workflow_dispatch
+  # Cannot be triggered directly, only via pipeline.yml
+  # which is only callable via orchestrator.yml
+  # Full call chain: orchestrator → pipeline → deploy_cdk
+  # Approval gate lives in orchestrator, so this is secure
   workflow_call:
     inputs:
-      service:
+      ag:
+        description: Target account group
         required: true
         type: string
+
       environment:
+        description: The environment level
         required: true
         type: string
+
       stack:
+        description: The stack to deploy
         required: true
         type: string
+
       tag:
+        description: Git tag to deploy
         required: true
         type: string
+
+      diff:
+        description: Run CDK diff?
+        required: false
+        type: boolean
+        default: false
+
+      destroy:
+        description: Run CDK destroy?
+        required: false
+        type: boolean
+        default: false
+
+      deploy:
+        description: Run CDK deploy?
+        required: false
+        type: boolean
+        default: true
 
 jobs:
   deploy:
-    name: Deploy ${{ inputs.stack }} → ${{ inputs.service }}-${{ inputs.environment }}
+    name: ${{ inputs.stack }} → ${{ inputs.ag }}-${{ inputs.environment }}
     runs-on: ubuntu-latest
+    # ✅ NO environment: here
+    # Approval already granted at orchestrator approval-gate
+    # This job is not directly triggerable (no workflow_dispatch above)
+    # so there is no security hole from removing environment:
 
-    # -------------------------------------------------------------------------
-    # ⚠️  THIS IS THE ROOT CAUSE
-    # This environment gate fires once per job that calls this workflow.
-    # So: orchestrator calls pipeline (×N services) which calls this (×2 stacks)
-    # Result: N × 2 approval prompts for prod
-    # -------------------------------------------------------------------------
-    environment: ${{ inputs.environment }}
+    permissions:
+      id-token: write
+      contents: write
 
     steps:
       - name: Show deployment info
@@ -35,16 +65,39 @@ jobs:
           echo "### 🔍 Deployment Info" >> $GITHUB_STEP_SUMMARY
           echo "| Field       | Value                         |" >> $GITHUB_STEP_SUMMARY
           echo "| ----------- | ----------------------------- |" >> $GITHUB_STEP_SUMMARY
-          echo "| Service     | ${{ inputs.service }}         |" >> $GITHUB_STEP_SUMMARY
+          echo "| AG          | ${{ inputs.ag }}              |" >> $GITHUB_STEP_SUMMARY
           echo "| Environment | ${{ inputs.environment }}     |" >> $GITHUB_STEP_SUMMARY
           echo "| Stack       | ${{ inputs.stack }}           |" >> $GITHUB_STEP_SUMMARY
           echo "| Tag         | ${{ inputs.tag }}             |" >> $GITHUB_STEP_SUMMARY
+          echo "| Diff        | ${{ inputs.diff }}            |" >> $GITHUB_STEP_SUMMARY
+          echo "| Destroy     | ${{ inputs.destroy }}         |" >> $GITHUB_STEP_SUMMARY
+          echo "| Deploy      | ${{ inputs.deploy }}          |" >> $GITHUB_STEP_SUMMARY
 
-      - name: Simulate deployment
+      - name: Simulate CDK diff
+        if: ${{ inputs.diff }}
         run: |
-          echo "🚀 Deploying stack '${{ inputs.stack }}'"
-          echo "   Service     : ${{ inputs.service }}"
+          echo "📊 Running CDK diff"
+          echo "   Stack : ${{ inputs.stack }}"
+          echo "   AG    : ${{ inputs.ag }}"
+          sleep 2
+          echo "✅ Diff complete"
+
+      - name: Simulate CDK deploy
+        if: ${{ inputs.deploy }}
+        run: |
+          echo "🚀 Running CDK deploy"
+          echo "   Stack       : ${{ inputs.stack }}"
+          echo "   AG          : ${{ inputs.ag }}"
           echo "   Environment : ${{ inputs.environment }}"
           echo "   Tag         : ${{ inputs.tag }}"
           sleep 5
-          echo "✅ Done"
+          echo "✅ Deploy complete"
+
+      - name: Simulate CDK destroy
+        if: ${{ inputs.destroy }}
+        run: |
+          echo "💥 Running CDK destroy"
+          echo "   Stack : ${{ inputs.stack }}"
+          echo "   AG    : ${{ inputs.ag }}"
+          sleep 2
+          echo "✅ Destroy complete"
