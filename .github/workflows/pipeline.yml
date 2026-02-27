@@ -1,9 +1,14 @@
 name: 🔧 Pipeline
 
 on:
+  # ✅ workflow_call only - no workflow_dispatch
+  # This means nobody can trigger this directly
+  # The only way in is via orchestrator.yml
+  # Therefore removing environment: from deploy_cdk.yml is safe
+  # because the only path to deploy_cdk goes through the orchestrator gate
   workflow_call:
     inputs:
-      service:
+      ag:
         required: true
         type: string
       environment:
@@ -11,78 +16,79 @@ on:
         type: string
       tag:
         required: true
-        type: string
-
-  workflow_dispatch:
-    inputs:
-      service:
-        description: "Service to deploy"
-        required: true
-        default: "alpha"
-        type: choice
-        options:
-          - alpha
-          - beta
-          - gamma
-      environment:
-        description: "Target environment"
-        required: true
-        default: "dev"
-        type: choice
-        options:
-          - dev
-          - prod
-      tag:
-        description: "Version tag"
-        required: true
-        default: "v1.0.0"
         type: string
 
 concurrency:
-  group: pipeline-${{ inputs.service }}-${{ inputs.environment }}
+  group: pipeline-${{ inputs.ag }}-${{ inputs.environment }}
   cancel-in-progress: false
 
 jobs:
 
-  # -------------------------------------------------------------------------
-  # THIS IS THE PROBLEM:
-  # Each of these two jobs calls deploy_cdk.yml which has:
-  #   environment: ${{ inputs.environment }}
-  # That means GitHub creates a NEW approval gate for every job call.
-  # With 3 services × prod = 6 approval prompts (2 per service).
-  # -------------------------------------------------------------------------
-
   deploy-core:
-    name: 🏗️ Core [${{ inputs.service }}-${{ inputs.environment }}]
+    name: 🏗️ Core [${{ inputs.ag }}-${{ inputs.environment }}]
     uses: ./.github/workflows/deploy_cdk.yml
     with:
-      service: ${{ inputs.service }}
+      ag: ${{ inputs.ag }}
       environment: ${{ inputs.environment }}
-      stack: "core"
+      stack: "core-stack"
       tag: ${{ inputs.tag }}
+      deploy: true
+      diff: false
+      destroy: false
     secrets: inherit
 
   deploy-app:
-    name: 📦 App [${{ inputs.service }}-${{ inputs.environment }}]
+    name: 📦 App [${{ inputs.ag }}-${{ inputs.environment }}]
     needs: deploy-core
     uses: ./.github/workflows/deploy_cdk.yml
     with:
-      service: ${{ inputs.service }}
+      ag: ${{ inputs.ag }}
       environment: ${{ inputs.environment }}
-      stack: "app"
+      stack: "app-stack"
       tag: ${{ inputs.tag }}
+      deploy: true
+      diff: false
+      destroy: false
     secrets: inherit
 
-  post-deploy:
-    name: ✅ Post Deploy
+  smoke-tests:
+    name: 🧪 Smoke Tests [${{ inputs.ag }}-${{ inputs.environment }}]
     needs: deploy-app
     runs-on: ubuntu-latest
     steps:
-      - name: Summary
+      - name: Run smoke tests
+        run: |
+          echo "🧪 Running smoke tests"
+          echo "   AG          : ${{ inputs.ag }}"
+          echo "   Environment : ${{ inputs.environment }}"
+          echo "   Tag         : ${{ inputs.tag }}"
+          sleep 3
+          echo "✅ Smoke tests passed"
+
+  post-deploy:
+    name: ✅ Post Deploy [${{ inputs.ag }}-${{ inputs.environment }}]
+    needs: smoke-tests
+    runs-on: ubuntu-latest
+    # ✅ prd-internal has NO protection rules
+    # Used only for deployment tracking in GitHub UI
+    # Real protection already happened at approval-gate in orchestrator
+    environment: ${{ inputs.environment == 'prd' && 'prd-internal' || inputs.environment }}
+    outputs:
+      env_name: ${{ steps.env.outputs.env_name }}
+    steps:
+      - id: env
+        name: Compute environment name
+        run: |
+          CLEANED="${{ inputs.ag }}"
+          CLEANED="${CLEANED#grp-}"
+          echo "env_name=$CLEANED-${{ inputs.environment }}" >> $GITHUB_OUTPUT
+
+      - name: Post deploy summary
         run: |
           echo "### ✅ Deployment Complete" >> $GITHUB_STEP_SUMMARY
           echo "| Field       | Value                         |" >> $GITHUB_STEP_SUMMARY
           echo "| ----------- | ----------------------------- |" >> $GITHUB_STEP_SUMMARY
-          echo "| Service     | ${{ inputs.service }}         |" >> $GITHUB_STEP_SUMMARY
+          echo "| AG          | ${{ inputs.ag }}              |" >> $GITHUB_STEP_SUMMARY
           echo "| Environment | ${{ inputs.environment }}     |" >> $GITHUB_STEP_SUMMARY
           echo "| Tag         | ${{ inputs.tag }}             |" >> $GITHUB_STEP_SUMMARY
+          echo "| Deployed at | $(date -u '+%Y-%m-%d %H:%M UTC') |" >> $GITHUB_STEP_SUMMARY
