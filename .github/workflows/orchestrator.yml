@@ -1,0 +1,107 @@
+name: 🎯 Orchestrator
+
+on:
+  workflow_dispatch:
+    inputs:
+      environments:
+        description: "Environments (comma-separated: dev,prod)"
+        required: true
+        default: "dev"
+      services:
+        description: "Services (comma-separated: alpha,beta,gamma)"
+        required: true
+        default: "alpha,beta"
+      tag:
+        description: "Version tag to deploy (e.g. v1.0.0)"
+        required: true
+        default: "v1.0.0"
+      exclude:
+        description: "Exclude service-env pairs (e.g. alpha-dev,beta-prod)"
+        required: false
+        default: ""
+
+jobs:
+  build-matrix:
+    name: Build Matrix
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.generate.outputs.matrix }}
+
+    steps:
+      - name: Generate deployment matrix
+        id: generate
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          # Parse inputs
+          readarray -t SELECTED_ENVS < <(echo "${{ github.event.inputs.environments }}" | tr ',' '\n' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+          readarray -t SELECTED_SVCS < <(echo "${{ github.event.inputs.services }}"     | tr ',' '\n' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+          readarray -t EXCLUDES      < <(echo "${{ github.event.inputs.exclude }}"      | tr ',' '\n' | sed '/^$/d')
+
+          echo "Environments : ${SELECTED_ENVS[*]}"
+          echo "Services     : ${SELECTED_SVCS[*]}"
+          echo "Excludes     : ${EXCLUDES[*]:-none}"
+
+          # Build matrix entries as JSON
+          ENTRIES="[]"
+
+          for svc in "${SELECTED_SVCS[@]}"; do
+            for env in "${SELECTED_ENVS[@]}"; do
+              combined="${svc}-${env}"
+
+              # Check exclusions
+              excluded=false
+              for ex in "${EXCLUDES[@]:-}"; do
+                if [[ "$ex" == "$combined" ]]; then
+                  excluded=true
+                  break
+                fi
+              done
+
+              if $excluded; then
+                echo "Skipping excluded pair: $combined"
+                continue
+              fi
+
+              ENTRIES=$(echo "$ENTRIES" | jq \
+                --arg svc "$svc" \
+                --arg env "$env" \
+                --arg combined "$combined" \
+                '. += [{"service": $svc, "env": $env, "combined": $combined}]')
+            done
+          done
+
+          COUNT=$(echo "$ENTRIES" | jq length)
+          if [ "$COUNT" -eq 0 ]; then
+            echo "❌ ERROR: No matrix entries after filtering."
+            exit 1
+          fi
+
+          MATRIX=$(echo "$ENTRIES" | jq -c '{ include: . }')
+
+          echo "Matrix:"
+          echo "$MATRIX" | jq .
+
+          echo "matrix=$MATRIX" >> "$GITHUB_OUTPUT"
+
+  deploy:
+    name: 🚀 ${{ matrix.service }} / ${{ matrix.env }}
+    needs: build-matrix
+
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.build-matrix.outputs.matrix) }}
+
+    concurrency:
+      group: deploy-${{ matrix.service }}-${{ matrix.env }}
+      cancel-in-progress: false
+
+    uses: ./.github/workflows/pipeline.yml
+
+    with:
+      service: ${{ matrix.service }}
+      environment: ${{ matrix.env }}
+      tag: ${{ github.event.inputs.tag }}
+
+    secrets: inherit
