@@ -1,0 +1,88 @@
+name: 🔧 Pipeline
+
+on:
+  workflow_call:
+    inputs:
+      service:
+        required: true
+        type: string
+      environment:
+        required: true
+        type: string
+      tag:
+        required: true
+        type: string
+
+  workflow_dispatch:
+    inputs:
+      service:
+        description: "Service to deploy"
+        required: true
+        default: "alpha"
+        type: choice
+        options:
+          - alpha
+          - beta
+          - gamma
+      environment:
+        description: "Target environment"
+        required: true
+        default: "dev"
+        type: choice
+        options:
+          - dev
+          - prod
+      tag:
+        description: "Version tag"
+        required: true
+        default: "v1.0.0"
+        type: string
+
+concurrency:
+  group: pipeline-${{ inputs.service }}-${{ inputs.environment }}
+  cancel-in-progress: false
+
+jobs:
+
+  # -------------------------------------------------------------------------
+  # THIS IS THE PROBLEM:
+  # Each of these two jobs calls deploy_cdk.yml which has:
+  #   environment: ${{ inputs.environment }}
+  # That means GitHub creates a NEW approval gate for every job call.
+  # With 3 services × prod = 6 approval prompts (2 per service).
+  # -------------------------------------------------------------------------
+
+  deploy-core:
+    name: 🏗️ Core [${{ inputs.service }}-${{ inputs.environment }}]
+    uses: ./.github/workflows/deploy_cdk.yml
+    with:
+      service: ${{ inputs.service }}
+      environment: ${{ inputs.environment }}
+      stack: "core"
+      tag: ${{ inputs.tag }}
+    secrets: inherit
+
+  deploy-app:
+    name: 📦 App [${{ inputs.service }}-${{ inputs.environment }}]
+    needs: deploy-core
+    uses: ./.github/workflows/deploy_cdk.yml
+    with:
+      service: ${{ inputs.service }}
+      environment: ${{ inputs.environment }}
+      stack: "app"
+      tag: ${{ inputs.tag }}
+    secrets: inherit
+
+  post-deploy:
+    name: ✅ Post Deploy
+    needs: deploy-app
+    runs-on: ubuntu-latest
+    steps:
+      - name: Summary
+        run: |
+          echo "### ✅ Deployment Complete" >> $GITHUB_STEP_SUMMARY
+          echo "| Field       | Value                         |" >> $GITHUB_STEP_SUMMARY
+          echo "| ----------- | ----------------------------- |" >> $GITHUB_STEP_SUMMARY
+          echo "| Service     | ${{ inputs.service }}         |" >> $GITHUB_STEP_SUMMARY
+          echo "| Environment | ${{ inputs.environment }}     |" >> $GITHUB_STEP_SUMMARY
+          echo "| Tag         | ${{ inputs.tag }}             |" >> $GITHUB_STEP_SUMMARY
