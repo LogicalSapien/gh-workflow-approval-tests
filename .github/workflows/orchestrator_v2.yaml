@@ -1,28 +1,37 @@
-name: 🎯 Orchestrator V2
+name: 🎯 Deployment Orchestrator
+
+run-name: >-
+  Deploy ${{ github.event.inputs.tag }}
+  to [${{ github.event.inputs.environments }}]
+  across [${{ github.event.inputs.ags }}]
+  by @${{ github.actor }}
 
 on:
   workflow_dispatch:
     inputs:
       environments:
-        description: "Environments (comma-separated: dev,prod)"
+        description: "Select environments (comma-separated e.g. dev,tst,prd)"
         required: true
         default: "dev"
-      services:
-        description: "Services (comma-separated: alpha,beta,gamma)"
+      ags:
+        description: "Select Account Groups (comma-separated e.g. grp-alpha,grp-beta)"
         required: true
-        default: "alpha,beta"
-      tag:
-        description: "Version tag to deploy (e.g. v1.0.0)"
-        required: true
-        default: "v1.0.0"
+        default: "grp-alpha"
       exclude:
-        description: "Exclude service-env pairs (e.g. alpha-dev,beta-prod)"
+        description: "Exclude AG-env pairs (e.g. alpha-dev,beta-tst)"
         required: false
         default: ""
+      tag:
+        description: "Git Tag to deploy (e.g. v1.0.0)"
+        required: true
+        default: "v1.0.0"
 
 jobs:
+  # ---------------------------------------------------------------------------
+  # STEP 1: Build the matrix from inputs
+  # ---------------------------------------------------------------------------
   build-matrix:
-    name: Build Matrix
+    name: 🧱 Build Matrix
     runs-on: ubuntu-latest
     outputs:
       matrix: ${{ steps.generate.outputs.matrix }}
@@ -35,24 +44,24 @@ jobs:
         run: |
           set -euo pipefail
 
-          # Parse inputs
           readarray -t SELECTED_ENVS < <(echo "${{ github.event.inputs.environments }}" | tr ',' '\n' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
-          readarray -t SELECTED_SVCS < <(echo "${{ github.event.inputs.services }}"     | tr ',' '\n' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+          readarray -t SELECTED_AGS  < <(echo "${{ github.event.inputs.ags }}"          | tr ',' '\n' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
           readarray -t EXCLUDES      < <(echo "${{ github.event.inputs.exclude }}"      | tr ',' '\n' | sed '/^$/d')
 
           echo "Environments : ${SELECTED_ENVS[*]}"
-          echo "Services     : ${SELECTED_SVCS[*]}"
+          echo "AGs          : ${SELECTED_AGS[*]}"
           echo "Excludes     : ${EXCLUDES[*]:-none}"
 
-          # Build matrix entries as JSON
           ENTRIES="[]"
           HAS_PROD=false
 
-          for svc in "${SELECTED_SVCS[@]}"; do
-            for env in "${SELECTED_ENVS[@]}"; do
-              combined="${svc}-${env}"
+          for ag in "${SELECTED_AGS[@]}"; do
+            # Derive short name: grp-alpha → alpha
+            short=$(echo "$ag" | sed 's/^grp-//')
 
-              # Check exclusions
+            for env in "${SELECTED_ENVS[@]}"; do
+              combined="${short}-${env}"
+
               excluded=false
               for ex in "${EXCLUDES[@]:-}"; do
                 if [[ "$ex" == "$combined" ]]; then
@@ -66,16 +75,16 @@ jobs:
                 continue
               fi
 
-              # Track if any prod deployments are in the matrix
-              if [[ "$env" == "prod" ]]; then
+              if [[ "$env" == "prd" ]]; then
                 HAS_PROD=true
               fi
 
               ENTRIES=$(echo "$ENTRIES" | jq \
-                --arg svc "$svc" \
+                --arg ag "$ag" \
                 --arg env "$env" \
+                --arg short "$short" \
                 --arg combined "$combined" \
-                '. += [{"service": $svc, "env": $env, "combined": $combined}]')
+                '. += [{"ag": $ag, "env": $env, "short": $short, "combined": $combined}]')
             done
           done
 
@@ -91,47 +100,49 @@ jobs:
           echo "$MATRIX" | jq .
           echo "Needs prod gate: $HAS_PROD"
 
-          echo "matrix=$MATRIX"           >> "$GITHUB_OUTPUT"
+          echo "matrix=$MATRIX"            >> "$GITHUB_OUTPUT"
           echo "needs_prod_gate=$HAS_PROD" >> "$GITHUB_OUTPUT"
 
+      - name: Matrix summary
+        run: |
+          echo "### 🧱 Matrix Built" >> $GITHUB_STEP_SUMMARY
+          echo "| Field        | Value                                   |" >> $GITHUB_STEP_SUMMARY
+          echo "| ------------ | --------------------------------------- |" >> $GITHUB_STEP_SUMMARY
+          echo "| Environments | ${{ github.event.inputs.environments }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| AGs          | ${{ github.event.inputs.ags }}          |" >> $GITHUB_STEP_SUMMARY
+          echo "| Tag          | ${{ github.event.inputs.tag }}          |" >> $GITHUB_STEP_SUMMARY
+          echo "| Exclude      | ${{ github.event.inputs.exclude }}      |" >> $GITHUB_STEP_SUMMARY
+
   # ---------------------------------------------------------------------------
-  # SINGLE APPROVAL GATE
-  # This job only runs when prod is in the matrix.
-  # All deploy jobs wait on this - so only ONE approval prompt fires
-  # regardless of how many services or stacks are being deployed.
+  # STEP 2: ONE approval gate before anything deploys
+  # - prd included → gates on 'prd' environment (protected, needs approval)
+  # - no prd        → gates on 'dev' environment (no protection, passes through)
   # ---------------------------------------------------------------------------
   approval-gate:
     name: 🔐 Awaiting Approval
     needs: build-matrix
     runs-on: ubuntu-latest
-
-    # Only pause for approval when prod is included
-    # For dev-only runs this job still runs but dev has no protection rules
-    # so it passes straight through with zero friction
-    environment: ${{ needs.build-matrix.outputs.needs_prod_gate == 'true' && 'prod' || 'dev' }}
+    environment: ${{ needs.build-matrix.outputs.needs_prod_gate == 'true' && 'prd' || 'dev' }}
 
     steps:
-      - name: Summarise what was approved
+      - name: Approval summary
         run: |
           echo "### 🔐 Deployment Approved" >> $GITHUB_STEP_SUMMARY
-          echo "| Field        | Value                                    |" >> $GITHUB_STEP_SUMMARY
-          echo "| ------------ | ---------------------------------------- |" >> $GITHUB_STEP_SUMMARY
-          echo "| Approved by  | @${{ github.actor }}                     |" >> $GITHUB_STEP_SUMMARY
-          echo "| Services     | ${{ github.event.inputs.services }}      |" >> $GITHUB_STEP_SUMMARY
-          echo "| Environments | ${{ github.event.inputs.environments }}  |" >> $GITHUB_STEP_SUMMARY
-          echo "| Tag          | ${{ github.event.inputs.tag }}           |" >> $GITHUB_STEP_SUMMARY
-          echo "| Triggered at | $(date -u '+%Y-%m-%d %H:%M UTC')         |" >> $GITHUB_STEP_SUMMARY
+          echo "| Field        | Value                                   |" >> $GITHUB_STEP_SUMMARY
+          echo "| ------------ | --------------------------------------- |" >> $GITHUB_STEP_SUMMARY
+          echo "| Approved by  | @${{ github.actor }}                    |" >> $GITHUB_STEP_SUMMARY
+          echo "| Environments | ${{ github.event.inputs.environments }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| AGs          | ${{ github.event.inputs.ags }}          |" >> $GITHUB_STEP_SUMMARY
+          echo "| Tag          | ${{ github.event.inputs.tag }}          |" >> $GITHUB_STEP_SUMMARY
+          echo "| Approved at  | $(date -u '+%Y-%m-%d %H:%M UTC')        |" >> $GITHUB_STEP_SUMMARY
 
   # ---------------------------------------------------------------------------
-  # MATRIX DEPLOY
-  # Now needs approval-gate to pass first.
-  # All N services × M envs start together after the single approval.
-  # deploy_cdk.yml still has environment: set but because the approval
-  # was already granted at the gate, GitHub reuses that approval and
-  # does NOT prompt again.
+  # STEP 3: Matrix deploy - only starts after approval gate passes
+  # Calls pipeline.yml which has NO workflow_dispatch
+  # so it cannot be triggered directly, only via this orchestrator
   # ---------------------------------------------------------------------------
   deploy:
-    name: 🚀 ${{ matrix.service }} / ${{ matrix.env }}
+    name: 🚀 ${{ matrix.ag }} / ${{ matrix.env }}
     needs: [build-matrix, approval-gate]
 
     strategy:
@@ -139,14 +150,15 @@ jobs:
       matrix: ${{ fromJson(needs.build-matrix.outputs.matrix) }}
 
     concurrency:
-      group: deploy-${{ matrix.service }}-${{ matrix.env }}
+      group: deploy-${{ matrix.ag }}-${{ matrix.env }}
       cancel-in-progress: false
 
     uses: ./.github/workflows/pipeline.yml
 
     with:
-      service: ${{ matrix.service }}
+      ag: ${{ matrix.ag }}
       environment: ${{ matrix.env }}
       tag: ${{ github.event.inputs.tag }}
 
     secrets: inherit
+    
