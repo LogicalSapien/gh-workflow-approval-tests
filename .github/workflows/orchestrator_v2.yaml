@@ -10,11 +10,11 @@ on:
   workflow_dispatch:
     inputs:
       environments:
-        description: "Environments (comma-separated e.g. dev,tst,prd)"
+        description: "Select environments (comma-separated e.g. dev,tst,prd)"
         required: true
         default: "dev"
       ags:
-        description: "Account Groups (comma-separated e.g. grp-alpha,grp-beta)"
+        description: "Select Account Groups (comma-separated e.g. grp-alpha,grp-beta,grp-gamma)"
         required: true
         default: "grp-alpha"
       exclude:
@@ -28,18 +28,20 @@ on:
 
 jobs:
   # ---------------------------------------------------------------------------
-  # STEP 1: Validate inputs and decide gate environment
+  # STEP 1: Build matrix from inputs
+  # Mirrors your real orchestrator build-matrix job
+  # but reads from inputs instead of a JSON registry file
   # ---------------------------------------------------------------------------
-  prepare:
-    name: 🧱 Prepare
+  build-matrix:
+    name: 🧱 Build Matrix
     runs-on: ubuntu-latest
     outputs:
-      gate_env: ${{ steps.prepare.outputs.gate_env }}
-      pairs: ${{ steps.prepare.outputs.pairs }}
+      matrix: ${{ steps.generate.outputs.matrix }}
+      gate_env: ${{ steps.generate.outputs.gate_env }}
 
     steps:
-      - name: Parse inputs and determine gate
-        id: prepare
+      - name: Generate deployment matrix
+        id: generate
         shell: bash
         run: |
           set -euo pipefail
@@ -52,15 +54,17 @@ jobs:
           echo "AGs          : ${SELECTED_AGS[*]}"
           echo "Excludes     : ${EXCLUDES[*]:-none}"
 
+          ENTRIES="[]"
           GATE_ENV="dev"
-          PAIRS="[]"
 
           for ag in "${SELECTED_AGS[@]}"; do
+            # Derive short name: grp-alpha → alpha
             short=$(echo "$ag" | sed 's/^grp-//')
 
             for env in "${SELECTED_ENVS[@]}"; do
               combined="${short}-${env}"
 
+              # Check exclusions
               excluded=false
               for ex in "${EXCLUDES[@]:-}"; do
                 if [[ "$ex" == "$combined" ]]; then
@@ -70,44 +74,44 @@ jobs:
               done
 
               if $excluded; then
-                echo "Skipping: $combined"
+                echo "Skipping excluded pair: $combined"
                 continue
               fi
 
-              # Escalate gate
+              # Escalate gate env - prd beats tst beats dev
               if [[ "$env" == "prd" ]]; then
                 GATE_ENV="prd"
               elif [[ "$env" == "tst" && "$GATE_ENV" != "prd" ]]; then
                 GATE_ENV="tst"
               fi
 
-              PAIRS=$(echo "$PAIRS" | jq \
+              ENTRIES=$(echo "$ENTRIES" | jq \
                 --arg ag "$ag" \
                 --arg env "$env" \
+                --arg short "$short" \
                 --arg combined "$combined" \
-                '. += [{"ag": $ag, "env": $env, "combined": $combined}]')
+                '. += [{"ag": $ag, "env": $env, "short": $short, "combined": $combined}]')
             done
           done
 
-          COUNT=$(echo "$PAIRS" | jq length)
+          COUNT=$(echo "$ENTRIES" | jq length)
           if [ "$COUNT" -eq 0 ]; then
-            echo "❌ ERROR: No AG-env pairs after filtering."
+            echo "❌ ERROR: No matrix entries after filtering."
             exit 1
           fi
 
-          echo "Pairs to deploy:"
-          echo "$PAIRS" | jq .
+          MATRIX=$(echo "$ENTRIES" | jq -c '{ include: . }')
+
+          echo "Matrix:"
+          echo "$MATRIX" | jq .
           echo "Gate environment: $GATE_ENV"
 
-          # Pass pairs as a JSON string so the deploy job can loop over them
-          PAIRS_COMPACT=$(echo "$PAIRS" | jq -c .)
+          echo "matrix=$MATRIX"     >> "$GITHUB_OUTPUT"
+          echo "gate_env=$GATE_ENV" >> "$GITHUB_OUTPUT"
 
-          echo "gate_env=$GATE_ENV"      >> "$GITHUB_OUTPUT"
-          echo "pairs=$PAIRS_COMPACT"    >> "$GITHUB_OUTPUT"
-
-      - name: Prepare summary
+      - name: Matrix summary
         run: |
-          echo "### 🧱 Deployment Prepared" >> $GITHUB_STEP_SUMMARY
+          echo "### 🧱 Matrix Built" >> $GITHUB_STEP_SUMMARY
           echo "| Field        | Value                                   |" >> $GITHUB_STEP_SUMMARY
           echo "| ------------ | --------------------------------------- |" >> $GITHUB_STEP_SUMMARY
           echo "| Environments | ${{ github.event.inputs.environments }} |" >> $GITHUB_STEP_SUMMARY
@@ -117,14 +121,15 @@ jobs:
 
   # ---------------------------------------------------------------------------
   # STEP 2: ONE approval gate
-  # Entire workflow stops here until approved
-  # gate_env is set by bash above so no fragile expression
+  # gate_env is set explicitly in bash above - no fragile ternary expression
+  # dev/tst = no protection rules = passes straight through
+  # prd     = required reviewer   = pauses and waits for approval
   # ---------------------------------------------------------------------------
   approval-gate:
-    name: 🔐 Approval Gate [${{ needs.prepare.outputs.gate_env }}]
-    needs: prepare
+    name: 🔐 Approval Gate [${{ needs.build-matrix.outputs.gate_env }}]
+    needs: build-matrix
     runs-on: ubuntu-latest
-    environment: ${{ needs.prepare.outputs.gate_env }}
+    environment: ${{ needs.build-matrix.outputs.gate_env }}
 
     steps:
       - name: Approval summary
@@ -132,7 +137,7 @@ jobs:
           echo "### 🔐 Deployment Approved" >> $GITHUB_STEP_SUMMARY
           echo "| Field        | Value                                   |" >> $GITHUB_STEP_SUMMARY
           echo "| ------------ | --------------------------------------- |" >> $GITHUB_STEP_SUMMARY
-          echo "| Gate env     | ${{ needs.prepare.outputs.gate_env }}   |" >> $GITHUB_STEP_SUMMARY
+          echo "| Gate env     | ${{ needs.build-matrix.outputs.gate_env }} |" >> $GITHUB_STEP_SUMMARY
           echo "| Approved by  | @${{ github.actor }}                    |" >> $GITHUB_STEP_SUMMARY
           echo "| Environments | ${{ github.event.inputs.environments }} |" >> $GITHUB_STEP_SUMMARY
           echo "| AGs          | ${{ github.event.inputs.ags }}          |" >> $GITHUB_STEP_SUMMARY
@@ -140,83 +145,27 @@ jobs:
           echo "| Approved at  | $(date -u '+%Y-%m-%d %H:%M UTC')        |" >> $GITHUB_STEP_SUMMARY
 
   # ---------------------------------------------------------------------------
-  # STEP 3: ONE deploy job that loops all AG+env pairs
-  # No matrix = no matrix-expanded approval gates
-  # Each pair calls the pipeline reusable workflow via gh cli
-  # 
-  # NOTE: Because reusable workflows cannot be called in a bash loop,
-  # we inline the deployment logic here and call deploy_cdk.yml
-  # steps directly. This is the tradeoff vs matrix.
+  # STEP 3: Matrix deploy
+  # All N jobs start in parallel after the single approval gate passes
+  # Calls pipeline.yml which has NO workflow_dispatch
   # ---------------------------------------------------------------------------
   deploy:
-    name: 🚀 Deploy All
-    needs: [prepare, approval-gate]
-    runs-on: ubuntu-latest
-    # No environment: here - approval already done above
+    name: 🚀 ${{ matrix.ag }} / ${{ matrix.env }}
+    needs: [build-matrix, approval-gate]
 
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.build-matrix.outputs.matrix) }}
 
-      - name: Deploy all AG-env pairs
-        shell: bash
-        env:
-          PAIRS: ${{ needs.prepare.outputs.pairs }}
-          TAG:   ${{ github.event.inputs.tag }}
-        run: |
-          set -euo pipefail
+    concurrency:
+      group: deploy-${{ matrix.ag }}-${{ matrix.env }}
+      cancel-in-progress: false
 
-          echo "$PAIRS" | jq -c '.[]' | while IFS= read -r pair; do
-            AG=$(echo "$pair"       | jq -r '.ag')
-            ENV=$(echo "$pair"      | jq -r '.env')
-            COMBINED=$(echo "$pair" | jq -r '.combined')
+    uses: ./.github/workflows/pipeline.yml
 
-            echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-            echo "🚀 Deploying: $COMBINED (tag: $TAG)"
-            echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    with:
+      ag: ${{ matrix.ag }}
+      environment: ${{ matrix.env }}
+      tag: ${{ github.event.inputs.tag }}
 
-            echo ""
-            echo "🏗️  [Core Stack] $AG / $ENV"
-            # ------------------------------------------------------------------
-            # REPLACE THIS with your actual CDK deploy command
-            # e.g. cdk deploy --app "python src/python/cdk/core/app.py" ...
-            # ------------------------------------------------------------------
-            echo "   Simulating core stack deploy for $AG / $ENV"
-            sleep 2
-            echo "   ✅ Core stack done"
-
-            echo ""
-            echo "📦  [App Stack] $AG / $ENV"
-            # ------------------------------------------------------------------
-            # REPLACE THIS with your actual CDK deploy command
-            # e.g. cdk deploy --app "python src/python/cdk/$AG/app.py" ...
-            # ------------------------------------------------------------------
-            echo "   Simulating app stack deploy for $AG / $ENV"
-            sleep 2
-            echo "   ✅ App stack done"
-
-            echo ""
-            echo "🧪  [Smoke Tests] $AG / $ENV"
-            # ------------------------------------------------------------------
-            # REPLACE THIS with your actual smoke test command
-            # e.g. cd tests/python/smoke && uv run pytest -v
-            # ------------------------------------------------------------------
-            echo "   Simulating smoke tests for $AG / $ENV"
-            sleep 1
-            echo "   ✅ Smoke tests passed"
-
-            echo ""
-            echo "✅  $COMBINED complete"
-            echo ""
-
-          done
-
-      - name: Deployment summary
-        if: always()
-        env:
-          PAIRS: ${{ needs.prepare.outputs.pairs }}
-        run: |
-          echo "### 🚀 Deployment Summary" >> $GITHUB_STEP_SUMMARY
-          echo "| AG-Env | Tag |" >> $GITHUB_STEP_SUMMARY
-          echo "| ------ | --- |" >> $GITHUB_STEP_SUMMARY
-          echo "$PAIRS" | jq -r '.[] | "| \(.combined) | ${{ github.event.inputs.tag }} |"' >> $GITHUB_STEP_SUMMARY
+    secrets: inherit
