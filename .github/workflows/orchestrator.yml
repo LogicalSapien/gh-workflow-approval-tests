@@ -84,7 +84,7 @@ jobs:
     needs: build-matrix
     if: contains(github.event.inputs.environments, 'prod')
     runs-on: ubuntu-latest
-    environment: prod         # ← the ONE place the prod gate fires
+    environment: prd         # ← the ONE place the prod gate fires
     steps:
       - name: Approval granted
         run: |
