@@ -164,8 +164,15 @@ jobs:
               echo "All checks passed — resolved prdv2 → prd"
             else
               echo ""
-              echo "WARNING: prdv2 passed but one or more trust checks failed"
-              echo "RESOLVED stays as: $RESOLVED"
+              echo "❌ ERROR: prdv2 was passed but the caller chain is not trusted."
+              echo "   This environment alias may only be used by the orchestrator"
+              echo "   calling through account_deploy.yml in the $TRUSTED_REPO repository."
+              echo ""
+              echo "   If you need to deploy to prd, trigger the orchestrator directly"
+              echo "   or pass environment=prd to go through the normal approval gate."
+              echo "| Resolved   | \`$RESOLVED\` |"   >> "$GITHUB_STEP_SUMMARY"
+              echo "| Status     | ❌ Untrusted chain — workflow failed |" >> "$GITHUB_STEP_SUMMARY"
+              exit 1
             fi
       
           else
