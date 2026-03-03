@@ -95,19 +95,72 @@ jobs:
       # exactly as they did before this step existed.
       # =======================================================================
 
-      # SOLUTION: uncomment this step
+      # =============================================================================
+      # SOLUTION: Resolve environment
+      #
+      # Normalises the gate-bypass alias 'prdv2' back to 'prd', BUT ONLY when
+      # called through the expected orchestrator chain. This prevents any accidental
+      # or malicious use of 'prdv2' from bypassing the gate in other call paths.
+      #
+      # All three conditions must be true to trigger normalisation:
+      #   1. inputs.environment == 'prdv2'          (bypass alias was passed)
+      #   2. this_workflow      == 'orchestrator.yml' (top level is the orchestrator)
+      #   3. referenced_workflows contains 'account_deploy.yml' (went via middle layer)
+      #
+      # For all other callers (100+ workflows passing 'prd' directly):
+      #   - inputs.environment == 'prd' → condition 1 is false → RESOLVED='prd' as-is
+      #   - Backward compatible: behaviour is identical to before this step existed
+      # =============================================================================
       - name: Resolve environment
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          set -euo pipefail
+    
           RAW="${{ inputs.environment }}"
+          RESOLVED="$RAW"
+    
+          echo "Raw input environment : $RAW"
+    
+          # check if the caller chain matches orchestrator
           if [ "$RAW" = "prdv2" ]; then
-            RESOLVED="prd"
+    
+            # Query the run that contains THIS job.
+            RUN_DATA=$(gh api \
+              /repos/${{ github.repository }}/actions/runs/${{ github.run_id }})
+    
+            THIS_WORKFLOW=$(echo "$RUN_DATA" | jq -r '.path // ""')
+    
+            REFERENCED=$(echo "$RUN_DATA" | jq -r '[.referenced_workflows[]?.path] | join("|")')
+    
+            echo "this_workflow        : $THIS_WORKFLOW"
+            echo "referenced_workflows : $REFERENCED"
+    
+            # top-level run must be the orchestrator
+            # account_deploy.yml must appear in the referenced chain
+            if echo "$THIS_WORKFLOW" | grep -q "orchestrator.yml" && \
+               echo "$REFERENCED"    | grep -q "account_deploy.yml"; then
+    
+              RESOLVED="prd"
+              echo "Caller chain originated from Orchestrator"
+    
+            else
+              # prdv2 was passed but NOT from the trusted chain.
+              echo "prdv2 passed but caller chain is NOT the trusted orchestrator path"
+              echo "   this_workflow : $THIS_WORKFLOW"
+              echo "   referenced    : $REFERENCED"
+              echo "   RESOLVED stays as: $RESOLVED"
+            fi
+    
           else
-            RESOLVED="$RAW"
+            echo "Standard environment name — no resolution needed"
           fi
-          # Write to GITHUB_ENV so all subsequent steps see the resolved value
+    
+          echo "Resolved environment : $RESOLVED"
+    
+          # Write to GITHUB_ENV for all subsequent steps
           echo "ENVIRONMENT=$RESOLVED" >> "$GITHUB_ENV"
           echo "ENV_NAME=$RESOLVED"    >> "$GITHUB_ENV"
-          echo "Resolved: '$RAW' → '$RESOLVED'"
 
       # =======================================================================
       # Without the solution, set ENVIRONMENT directly from inputs so the steps
@@ -196,16 +249,7 @@ jobs:
             >> "$GITHUB_STEP_SUMMARY"
     
           echo "| current | ${{ github.workflow }} | ${{ github.ref }} |" \
-            >> "$GITHUB_STEP_SUMMARY"
-
-      - name: Trace caller (cross-repo aware)
-        env:
-          GH_TOKEN: ${{ secrets.PAT_GITHUB_TOKEN }}  # needs read access to both repos
-        run: |
-          # github.repository here is the repo where the CALLING workflow lives
-          # not where _deploy_cdk.yml is defined
-          gh api /repos/${{ github.repository }}/actions/runs/${{ github.run_id }} \
-            --jq '.referenced_workflows[] | .path'            
+            >> "$GITHUB_STEP_SUMMARY"     
 
       # -----------------------------------------------------------------------
       - name: "Simulate CDK command"
