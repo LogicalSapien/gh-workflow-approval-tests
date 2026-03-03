@@ -1,0 +1,158 @@
+# =============================================================================
+# FILE: .github/workflows/account_deploy.yml
+# PURPOSE: Per-account deployment — mirrors deploy_release_aws_account.yaml
+#
+# PROBLEM BEING DEMONSTRATED:
+#   This file calls _deploy_cdk.yml twice (core, then app) passing
+#   `environment: ${{ inputs.environment }}` straight through each time.
+#   _deploy_cdk.yml has `environment: ${{ inputs.environment }}` at the job
+#   level, so GitHub evaluates the protection rule TWICE per account.
+#   With a matrix of N accounts you get N×2 prompts.
+#
+#   Additionally, post-deploy also has `environment: ${{ inputs.environment }}`
+#   adding a third prompt per account (N×3 total).
+#
+# SOLUTION (commented — search for SOLUTION in this file):
+#   - Pass prdv2 (not prd) to both _deploy_cdk.yml calls
+#   - Remove environment: from post-deploy (gate already handled in orchestrator)
+# =============================================================================
+
+name: "DEMO Account Deploy"
+
+on:
+  workflow_call:
+    inputs:
+      account_group:
+        description: "Account group to deploy to"
+        required: true
+        type: string
+      environment:
+        description: "Target environment (dev, prd, prdv2...)"
+        required: true
+        type: string
+      ref:
+        description: "Git ref to deploy"
+        required: true
+        type: string
+
+  # Allow direct manual trigger for testing this file in isolation
+  workflow_dispatch:
+    inputs:
+      account_group:
+        description: "Account group"
+        required: true
+        default: "team-alpha"
+        type: choice
+        options:
+          - team-alpha
+          - team-beta
+      environment:
+        description: "Environment"
+        required: true
+        default: "dev"
+        type: choice
+        options:
+          - dev
+          - prd
+      ref:
+        description: "Git ref"
+        required: false
+        default: "main"
+        type: string
+
+concurrency:
+  group: "deploy-${{ inputs.account_group }}-${{ inputs.environment }}"
+  cancel-in-progress: false
+
+jobs:
+
+  # ---------------------------------------------------------------------------
+  # Deploys the "core" infrastructure stack for this account.
+  # Mirrors the deploy-core job in deploy_release_aws_account.yaml.
+  # ---------------------------------------------------------------------------
+  deploy-core:
+    name: "Deploy core"
+    uses: ./.github/workflows/_deploy_cdk.yml
+    with:
+      stack_name: "core-stack"
+      # PROBLEM: passes prd → _deploy_cdk.yml fires its environment gate here (prompt 1)
+      environment: ${{ inputs.environment }}
+
+      # SOLUTION STEP 4: replace the environment line above with:
+      # environment: ${{ inputs.environment == 'prd' && 'prdv2' || inputs.environment }}
+      # Explanation: prdv2 has no protection rules configured, so _deploy_cdk.yml's
+      # `environment: ${{ inputs.environment }}` line evaluates to prdv2 → no gate.
+      # _deploy_cdk.yml internally normalises prdv2 back to prd for all CDK/step logic.
+
+      account_group: ${{ inputs.account_group }}
+      ref: ${{ inputs.ref }}
+    secrets: inherit
+
+  # ---------------------------------------------------------------------------
+  # Deploys the "application" stack after core succeeds.
+  # Mirrors the deploy-app job in deploy_release_aws_account.yaml.
+  # ---------------------------------------------------------------------------
+  deploy-app:
+    name: "Deploy app"
+    needs: deploy-core
+    uses: ./.github/workflows/_deploy_cdk.yml
+    with:
+      stack_name: "app-stack"
+      # PROBLEM: passes prd → _deploy_cdk.yml fires its environment gate here (prompt 2)
+      environment: ${{ inputs.environment }}
+
+      # SOLUTION STEP 5: same as deploy-core above
+      # environment: ${{ inputs.environment == 'prd' && 'prdv2' || inputs.environment }}
+
+      account_group: ${{ inputs.account_group }}
+      ref: ${{ inputs.ref }}
+    secrets: inherit
+
+  # ---------------------------------------------------------------------------
+  # Post-deployment bookkeeping — records the deployment in GitHub Deployments
+  # so the /deployments tab is populated.
+  # ---------------------------------------------------------------------------
+  post-deploy:
+    name: "Post deploy"
+    needs: deploy-app
+    runs-on: ubuntu-latest
+
+    # PROBLEM: this fires a THIRD gate per account (prompt 3 of N×3 total)
+    environment: ${{ inputs.environment }}
+
+    # SOLUTION STEP 6: remove the line above entirely.
+    # The gate has already fired once in the orchestrator's approve-prd job.
+    # If you still want the GitHub Deployments tab entry, use the
+    # actions/github-script approach shown in the commented block below.
+
+    steps:
+      - name: Summarise deployment
+        run: |
+          echo "## Post-deploy: ${{ inputs.account_group }} → ${{ inputs.environment }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "Ref deployed: ${{ inputs.ref }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "Timestamp: $(date -u '+%Y-%m-%d %H:%M:%S UTC')" >> "$GITHUB_STEP_SUMMARY"
+
+      # SOLUTION (if you remove `environment:` above but still want a Deployments entry):
+      # - name: Record GitHub Deployment
+      #   uses: actions/github-script@v7
+      #   with:
+      #     script: |
+      #       // Create a deployment record without triggering environment protection rules.
+      #       // environment here is just a label string — it does NOT evaluate protection rules.
+      #       const deployment = await github.rest.repos.createDeployment({
+      #         owner: context.repo.owner,
+      #         repo: context.repo.repo,
+      #         ref: '${{ inputs.ref }}',
+      #         environment: '${{ inputs.account_group }}-${{ inputs.environment }}',
+      #         auto_merge: false,
+      #         required_contexts: [],
+      #         description: 'Deployed by ${{ github.actor }}'
+      #       });
+      #       await github.rest.repos.createDeploymentStatus({
+      #         owner: context.repo.owner,
+      #         repo: context.repo.repo,
+      #         deployment_id: deployment.data.id,
+      #         state: 'success',
+      #         description: 'Deployment succeeded'
+      #       });
+      #       console.log('Deployment recorded: ' + deployment.data.id);
