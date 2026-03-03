@@ -114,53 +114,88 @@ jobs:
       - name: Resolve environment
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TRUSTED_REPO: "LogicalSapien/gh-workflow-approval-tests"
+          TRUSTED_ORCHESTRATOR: "orchestrator.yml"
+          TRUSTED_MIDDLE_LAYER: "account_deploy.yml"
         run: |
           set -euo pipefail
-    
+      
           RAW="${{ inputs.environment }}"
           RESOLVED="$RAW"
-    
+      
           echo "Raw input environment : $RAW"
-    
-          # check if the caller chain matches orchestrator
+      
           if [ "$RAW" = "prdv2" ]; then
-    
-            # Query the run that contains THIS job.
-            RUN_DATA=$(gh api \
-              /repos/${{ github.repository }}/actions/runs/${{ github.run_id }})
-    
+      
+            echo "Bypass alias detected — verifying caller chain..."
+      
+            RUN_DATA=$(gh api /repos/${{ github.repository }}/actions/runs/${{ github.run_id }})
+      
             THIS_WORKFLOW=$(echo "$RUN_DATA" | jq -r '.path // ""')
-    
             REFERENCED=$(echo "$RUN_DATA" | jq -r '[.referenced_workflows[]?.path] | join("|")')
-    
-            echo "this_workflow        : $THIS_WORKFLOW"
-            echo "referenced_workflows : $REFERENCED"
-    
-            # top-level run must be the orchestrator
-            # account_deploy.yml must appear in the referenced chain
-            if echo "$THIS_WORKFLOW" | grep -q "orchestrator.yml" && \
-               echo "$REFERENCED"    | grep -q "account_deploy.yml"; then
-    
-              RESOLVED="prd"
-              echo "Caller chain originated from Orchestrator"
-    
-            else
-              # prdv2 was passed but NOT from the trusted chain.
-              echo "prdv2 passed but caller chain is NOT the trusted orchestrator path"
-              echo "   this_workflow : $THIS_WORKFLOW"
-              echo "   referenced    : $REFERENCED"
-              echo "   RESOLVED stays as: $RESOLVED"
+      
+            ACTUAL_REPO="${{ github.repository }}"
+      
+            REPO_OK=false
+            ORCH_OK=false
+            MIDDLE_OK=false
+      
+            if [ "$ACTUAL_REPO" = "$TRUSTED_REPO" ]; then
+              REPO_OK=true
             fi
-    
+      
+            if echo "$THIS_WORKFLOW" | grep -q "$TRUSTED_ORCHESTRATOR"; then
+              ORCH_OK=true
+            fi
+      
+            if echo "$REFERENCED" | grep -q "$TRUSTED_MIDDLE_LAYER"; then
+              MIDDLE_OK=true
+            fi
+      
+            echo ""
+            echo "Check results:"
+            echo "  [repo   ] expected=$TRUSTED_REPO        actual=$ACTUAL_REPO → $REPO_OK"
+            echo "  [orch   ] contains=$TRUSTED_ORCHESTRATOR  found in=$THIS_WORKFLOW → $ORCH_OK"
+            echo "  [middle ] contains=$TRUSTED_MIDDLE_LAYER  found in=chain → $MIDDLE_OK"
+      
+            if $REPO_OK && $ORCH_OK && $MIDDLE_OK; then
+              RESOLVED="prd"
+              echo ""
+              echo "All checks passed — resolved prdv2 → prd"
+            else
+              echo ""
+              echo "WARNING: prdv2 passed but one or more trust checks failed"
+              echo "RESOLVED stays as: $RESOLVED"
+            fi
+      
           else
             echo "Standard environment name — no resolution needed"
           fi
-    
+      
+          echo ""
           echo "Resolved environment : $RESOLVED"
-    
-          # Write to GITHUB_ENV for all subsequent steps
+      
           echo "ENVIRONMENT=$RESOLVED" >> "$GITHUB_ENV"
           echo "ENV_NAME=$RESOLVED"    >> "$GITHUB_ENV"
+      
+          # Step summary
+          {
+            echo "## Environment Resolution"
+            echo "| Check | Expected | Actual | Pass |"
+            echo "| --- | --- | --- | --- |"
+            if [ "$RAW" = "prdv2" ]; then
+              echo "| Repository   | \`$TRUSTED_REPO\`        | \`$ACTUAL_REPO\`      | $REPO_OK   |"
+              echo "| Orchestrator | contains \`$TRUSTED_ORCHESTRATOR\` | \`$THIS_WORKFLOW\` | $ORCH_OK |"
+              echo "| Middle layer | contains \`$TRUSTED_MIDDLE_LAYER\` | chain             | $MIDDLE_OK |"
+            else
+              echo "| — | — | — | n/a (env=$RAW, no check needed) |"
+            fi
+            echo ""
+            echo "| Field | Value |"
+            echo "| --- | --- |"
+            echo "| Raw input  | \`$RAW\`      |"
+            echo "| Resolved   | \`$RESOLVED\` |"
+          } >> "$GITHUB_STEP_SUMMARY"
 
       # =======================================================================
       # Without the solution, set ENVIRONMENT directly from inputs so the steps
