@@ -79,32 +79,32 @@ jobs:
   #
   # SOLUTION: uncomment approve-prod below and update the deploy job
   #
-  # approve-prod:
-  #   name: "Gate: Approve production deployment"
-  #   needs: build-matrix
-  #   if: contains(github.event.inputs.environments, 'prod')
-  #   runs-on: ubuntu-latest
-  #   environment: prod         # ← the ONE place the prod gate fires
-  #   steps:
-  #     - name: Approval granted
-  #       run: |
-  #         echo "Approved by ${{ github.actor }} — all matrix legs will now proceed"
+  approve-prod:
+    name: "Gate: Approve production deployment"
+    needs: build-matrix
+    if: contains(github.event.inputs.environments, 'prod')
+    runs-on: ubuntu-latest
+    environment: prod         # ← the ONE place the prod gate fires
+    steps:
+      - name: Approval granted
+        run: |
+          echo "Approved by ${{ github.actor }} — all matrix legs will now proceed"
   # ---------------------------------------------------------------------------
 
   deploy:
     name: "Deploy ${{ matrix.account_group }} / ${{ matrix.env }}"
 
     # PROBLEM: no gate coordination
-    needs: build-matrix
+    # needs: build-matrix
 
     # SOLUTION: replace needs + if above with:
-    # needs:
-    #   - build-matrix
-    #   - approve-prod
-    # if: |
-    #   always() &&
-    #   needs.build-matrix.result == 'success' &&
-    #   (needs.approve-prod.result == 'success' || needs.approve-prod.result == 'skipped')
+    needs:
+      - build-matrix
+      - approve-prod
+    if: |
+      always() &&
+      needs.build-matrix.result == 'success' &&
+      (needs.approve-prod.result == 'success' || needs.approve-prod.result == 'skipped')
 
     strategy:
       fail-fast: false
