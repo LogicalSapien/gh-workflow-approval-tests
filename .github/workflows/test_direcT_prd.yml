@@ -1,0 +1,45 @@
+# =============================================================================
+# FILE: .github/workflows/test_direct_prdv2_call.yml
+# PURPOSE: Tests the safety check in _deploy_cdk.yml
+#
+# This simulates a caller that tries to bypass the gate by passing prdv2
+# directly — WITHOUT going through the trusted orchestrator chain.
+#
+# Expected result:
+#   - _deploy_cdk.yml receives prdv2
+#   - Queries the API → this_workflow = test_direct_prdv2_call.yml
+#   - Does NOT find orchestrator.yml in the chain
+#   - Does NOT find account_deploy.yml in the chain
+#   - WARNING is printed
+#   - ENVIRONMENT stays as prdv2 (not resolved to prd)
+#   - CDK command would fail because 'prdv2' is not a real environment
+# =============================================================================
+
+name: "TEST Direct prdv2 Call (Safety Check)"
+
+run-name: "Safety test — direct prdv2 call by @${{ github.actor }}"
+
+on:
+  workflow_dispatch:
+    inputs:
+      account_group:
+        description: "Account group to test with"
+        required: true
+        default: "team-alpha"
+      stack_name:
+        description: "Stack name to test with"
+        required: true
+        default: "core-stack"
+
+jobs:
+  test-direct-bypass-attempt:
+    name: "Attempt direct prdv2 bypass"
+    uses: ./.github/workflows/_deploy_cdk.yml
+    with:
+      # Passing prdv2 directly — NOT via orchestrator → account_deploy chain
+      # _deploy_cdk.yml should detect this and NOT resolve prdv2 → prd
+      environment: "prdv2"
+      stack_name: ${{ github.event.inputs.stack_name }}
+      account_group: ${{ github.event.inputs.account_group }}
+      ref: ${{ github.ref }}
+    secrets: inherit
