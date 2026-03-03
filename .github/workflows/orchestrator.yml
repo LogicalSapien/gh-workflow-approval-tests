@@ -1,107 +1,150 @@
-name: 🎯 Orchestrator
+# =============================================================================
+# FILE: .github/workflows/orchestrator.yml
+# PURPOSE: Top-level orchestrator — mirrors deploy_release_multiple_account.yaml
+#
+# PROBLEM BEING DEMONSTRATED:
+#   When you run this with environments=prd, the deploy job fans out via matrix.
+#   Each matrix entry calls account_deploy.yml, which calls _deploy_cdk.yml TWICE
+#   (core + app). Each call hits `environment: ${{ inputs.environment }}` at the
+#   job level in _deploy_cdk.yml. With prd having required reviewers, you get
+#   N accounts × 2 calls × 1 gate = too many approval prompts.
+#
+# HOW TO REPLICATE THE PROBLEM:
+#   1. Create environments in your repo: prd (with required reviewer = you), dev
+#   2. Run this workflow with environments=prd, account_groups=team-alpha,team-beta
+#   3. Watch: you get 4 approval prompts (2 accounts × 2 CDK calls each)
+#      instead of the expected 1
+#
+# SOLUTION (commented out — see bottom of this file):
+#   Add a single approve-prd gate job here before the matrix deploy job.
+#   Pass prdv2 instead of prd into account_deploy.yml so _deploy_cdk.yml
+#   sees a non-protected environment name and fires no gate.
+# =============================================================================
+
+name: "DEMO Orchestrator"
+
+run-name: "Deploy ${{ inputs.tag }} to ${{ inputs.environments }} across ${{ inputs.account_groups }} by @${{ github.actor }}"
 
 on:
   workflow_dispatch:
     inputs:
       environments:
-        description: "Environments (comma-separated: dev,prod)"
+        description: "Environments (comma-separated: dev,prd)"
         required: true
         default: "dev"
-      services:
-        description: "Services (comma-separated: alpha,beta,gamma)"
+      account_groups:
+        description: "Account groups (comma-separated: team-alpha,team-beta)"
         required: true
-        default: "alpha,beta"
+        default: "team-alpha"
       tag:
-        description: "Version tag to deploy (e.g. v1.0.0)"
+        description: "Tag or ref to deploy (e.g. v1.0.0)"
         required: true
         default: "v1.0.0"
-      exclude:
-        description: "Exclude service-env pairs (e.g. alpha-dev,beta-prod)"
-        required: false
-        default: ""
 
 jobs:
+
+  # ---------------------------------------------------------------------------
+  # Builds the matrix of account+environment pairs to deploy
+  # In the real system this reads from a JSON registry file.
+  # Here we build it inline from the inputs for simplicity.
+  # ---------------------------------------------------------------------------
   build-matrix:
-    name: Build Matrix
+    name: Build deployment matrix
     runs-on: ubuntu-latest
     outputs:
       matrix: ${{ steps.generate.outputs.matrix }}
 
     steps:
-      - name: Generate deployment matrix
+      - name: Generate matrix from inputs
         id: generate
         shell: bash
         run: |
           set -euo pipefail
 
-          # Parse inputs
-          readarray -t SELECTED_ENVS < <(echo "${{ github.event.inputs.environments }}" | tr ',' '\n' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
-          readarray -t SELECTED_SVCS < <(echo "${{ github.event.inputs.services }}"     | tr ',' '\n' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
-          readarray -t EXCLUDES      < <(echo "${{ github.event.inputs.exclude }}"      | tr ',' '\n' | sed '/^$/d')
+          # Split comma-separated inputs into arrays
+          IFS=',' read -ra ENVS    <<< "${{ github.event.inputs.environments }}"
+          IFS=',' read -ra GROUPS  <<< "${{ github.event.inputs.account_groups }}"
 
-          echo "Environments : ${SELECTED_ENVS[*]}"
-          echo "Services     : ${SELECTED_SVCS[*]}"
-          echo "Excludes     : ${EXCLUDES[*]:-none}"
-
-          # Build matrix entries as JSON
-          ENTRIES="[]"
-
-          for svc in "${SELECTED_SVCS[@]}"; do
-            for env in "${SELECTED_ENVS[@]}"; do
-              combined="${svc}-${env}"
-
-              # Check exclusions
-              excluded=false
-              for ex in "${EXCLUDES[@]:-}"; do
-                if [[ "$ex" == "$combined" ]]; then
-                  excluded=true
-                  break
-                fi
-              done
-
-              if $excluded; then
-                echo "Skipping excluded pair: $combined"
-                continue
-              fi
-
-              ENTRIES=$(echo "$ENTRIES" | jq \
-                --arg svc "$svc" \
-                --arg env "$env" \
-                --arg combined "$combined" \
-                '. += [{"service": $svc, "env": $env, "combined": $combined}]')
+          # Build a JSON array of {account_group, env} pairs
+          # This mirrors what the real workflow reads from aws_account_group_registry.json
+          entries="[]"
+          for group in "${GROUPS[@]}"; do
+            group=$(echo "$group" | xargs)   # trim whitespace
+            for env in "${ENVS[@]}"; do
+              env=$(echo "$env" | xargs)
+              entries=$(echo "$entries" | jq \
+                --arg g "$group" \
+                --arg e "$env" \
+                '. += [{"account_group": $g, "env": $e}]')
             done
           done
 
-          COUNT=$(echo "$ENTRIES" | jq length)
-          if [ "$COUNT" -eq 0 ]; then
-            echo "❌ ERROR: No matrix entries after filtering."
-            exit 1
-          fi
-
-          MATRIX=$(echo "$ENTRIES" | jq -c '{ include: . }')
-
-          echo "Matrix:"
-          echo "$MATRIX" | jq .
-
+          MATRIX=$(echo "$entries" | jq -c '{"include": .}')
+          echo "Generated matrix: $MATRIX"
           echo "matrix=$MATRIX" >> "$GITHUB_OUTPUT"
 
+  # ---------------------------------------------------------------------------
+  # ============================================================
+  # PROBLEM: No single gate here. The gate fires inside
+  # _deploy_cdk.yml once per call, so N accounts × 2 calls
+  # = too many prompts.
+  # ============================================================
+  #
+  # SOLUTION STEP 1 (uncomment the approve-prd job below, and
+  # update the deploy job's `needs` and `if` accordingly):
+  #
+  # approve-prd:
+  #   name: "Gate: Approve production deployment"
+  #   needs: build-matrix
+  #   # Only materialises when prd is actually in the environment list.
+  #   # For dev-only runs this job is skipped entirely — no prompt.
+  #   if: contains(github.event.inputs.environments, 'prd')
+  #   runs-on: ubuntu-latest
+  #   # THIS is the one and only place the prd protection rule fires.
+  #   # One approval here unlocks all matrix legs simultaneously.
+  #   environment: prd
+  #   steps:
+  #     - name: Approval granted
+  #       run: |
+  #         echo "Production deployment approved by ${{ github.actor }}"
+  #         echo "All matrix legs will now proceed without further gates."
+  # ---------------------------------------------------------------------------
+
   deploy:
-    name: 🚀 ${{ matrix.service }} / ${{ matrix.env }}
+    name: "Deploy ${{ matrix.account_group }} / ${{ matrix.env }}"
+
+    # PROBLEM (current): only needs build-matrix, no gate
     needs: build-matrix
+
+    # SOLUTION STEP 2: replace the needs/if above with these:
+    # needs:
+    #   - build-matrix
+    #   - approve-prd
+    # # Run if approve-prd succeeded (prd run) OR was skipped (dev/non-prd run).
+    # # `always()` is needed here because approve-prd may be skipped,
+    # # and by default a skipped `needs` job would block the dependent.
+    # if: |
+    #   always() &&
+    #   needs.build-matrix.result == 'success' &&
+    #   (needs.approve-prd.result == 'success' || needs.approve-prd.result == 'skipped')
 
     strategy:
       fail-fast: false
       matrix: ${{ fromJson(needs.build-matrix.outputs.matrix) }}
 
-    concurrency:
-      group: deploy-${{ matrix.service }}-${{ matrix.env }}
-      cancel-in-progress: false
-
-    uses: ./.github/workflows/pipeline.yml
+    uses: ./.github/workflows/account_deploy.yml
 
     with:
-      service: ${{ matrix.service }}
+      account_group: ${{ matrix.account_group }}
+      # PROBLEM (current): passes the real env name (prd) straight through.
+      # _deploy_cdk.yml will fire a gate for every single call.
       environment: ${{ matrix.env }}
-      tag: ${{ github.event.inputs.tag }}
+
+      # SOLUTION STEP 3: replace the environment line above with this expression.
+      # prd  → prdv2  (prdv2 has no protection rules, so no gate fires in _deploy_cdk.yml)
+      # anything else passes through unchanged
+      # environment: ${{ matrix.env == 'prd' && 'prdv2' || matrix.env }}
+
+      ref: ${{ github.event.inputs.tag }}
 
     secrets: inherit
