@@ -35,31 +35,6 @@ on:
         required: true
         type: string
 
-  # Allow direct manual trigger for testing this file in isolation
-  workflow_dispatch:
-    inputs:
-      account_group:
-        description: "Account group"
-        required: true
-        default: "team-alpha"
-        type: choice
-        options:
-          - team-alpha
-          - team-beta
-      environment:
-        description: "Environment"
-        required: true
-        default: "dev"
-        type: choice
-        options:
-          - dev
-          - prd
-      ref:
-        description: "Git ref"
-        required: false
-        default: "main"
-        type: string
-
 concurrency:
   group: "deploy-${{ inputs.account_group }}-${{ inputs.environment }}"
   cancel-in-progress: false
@@ -76,10 +51,10 @@ jobs:
     with:
       stack_name: "core-stack"
       # PROBLEM: passes prd → _deploy_cdk.yml fires its environment gate here (prompt 1)
-      environment: ${{ inputs.environment }}
+      # environment: ${{ inputs.environment }}
 
       # SOLUTION STEP 4: replace the environment line above with:
-      # environment: ${{ inputs.environment == 'prd' && 'prdv2' || inputs.environment }}
+      environment: ${{ inputs.environment == 'prd' && 'prdv2' || inputs.environment }}
       # Explanation: prdv2 has no protection rules configured, so _deploy_cdk.yml's
       # `environment: ${{ inputs.environment }}` line evaluates to prdv2 → no gate.
       # _deploy_cdk.yml internally normalises prdv2 back to prd for all CDK/step logic.
@@ -99,10 +74,10 @@ jobs:
     with:
       stack_name: "app-stack"
       # PROBLEM: passes prd → _deploy_cdk.yml fires its environment gate here (prompt 2)
-      environment: ${{ inputs.environment }}
+      # environment: ${{ inputs.environment }}
 
       # SOLUTION STEP 5: same as deploy-core above
-      # environment: ${{ inputs.environment == 'prd' && 'prdv2' || inputs.environment }}
+      environment: ${{ inputs.environment == 'prd' && 'prdv2' || inputs.environment }}
 
       account_group: ${{ inputs.account_group }}
       ref: ${{ inputs.ref }}
@@ -118,7 +93,7 @@ jobs:
     runs-on: ubuntu-latest
 
     # PROBLEM: this fires a THIRD gate per account (prompt 3 of N×3 total)
-    environment: ${{ inputs.environment }}
+    # environment: ${{ inputs.environment }}
 
     # SOLUTION STEP 6: remove the line above entirely.
     # The gate has already fired once in the orchestrator's approve-prd job.
