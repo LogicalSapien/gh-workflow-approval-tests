@@ -1,0 +1,205 @@
+# =============================================================================
+# FILE: .github/workflows/_deploy_cdk.yml
+# PURPOSE: Reusable CDK deployment — mirrors the real _deploy_cdk.yml
+#          Lives in a shared utils repo used by 100+ workflows.
+#          Changes here MUST be backward compatible.
+#
+# PROBLEM BEING DEMONSTRATED:
+#   This line:
+#       environment: ${{ inputs.environment }}
+#   at the job level causes GitHub to evaluate environment protection rules
+#   every time this workflow is called. When inputs.environment == 'prd' and
+#   prd has required reviewers, an approval prompt appears. Since this file is
+#   called N×2 times (N accounts × core+app), you get N×2 prompts.
+#
+# SOLUTION OVERVIEW (backward compatible):
+#   1. Keep `environment: ${{ inputs.environment }}` unchanged.
+#      When callers pass 'prdv2' (a non-protected env name), no gate fires.
+#      When other callers (100+ workflows) pass 'prd' directly, gate fires
+#      exactly as before — zero change in their behaviour.
+#
+#   2. Add a "Resolve environment" step as the VERY FIRST step.
+#      It maps prdv2 → prd and writes ENVIRONMENT + ENV_NAME to $GITHUB_ENV.
+#
+#   3. Change all step-level `if:` conditions and shell commands that previously
+#      read `inputs.environment` to instead read `env.ENVIRONMENT`.
+#      The env context IS available in step-level if: expressions.
+#      (It is NOT available in job-level if: — but we don't need it there.)
+#
+# BACKWARD COMPATIBILITY PROOF:
+#   Caller passes 'prd'   → environment: prd   → gate fires → ENVIRONMENT=prd  ✅ same as before
+#   Caller passes 'dev'   → environment: dev   → no gate   → ENVIRONMENT=dev   ✅ same as before
+#   Caller passes 'prdv2' → environment: prdv2 → no gate   → ENVIRONMENT=prd   ✅ new path only
+# =============================================================================
+
+name: "DEMO CDK Deploy (reusable)"
+
+on:
+  workflow_call:
+    inputs:
+      stack_name:
+        description: "CDK stack to deploy"
+        required: true
+        type: string
+      environment:
+        description: "Target environment. Pass 'prdv2' to skip gate (orchestrator usage)."
+        required: true
+        type: string
+      account_group:
+        description: "AWS account group"
+        required: false
+        type: string
+        default: "default-group"
+      ref:
+        description: "Git ref to deploy"
+        required: false
+        type: string
+        default: "main"
+
+jobs:
+  deploy:
+    name: "CDK deploy ${{ inputs.stack_name }} → ${{ inputs.account_group }} ${{ inputs.environment }}"
+    runs-on: ubuntu-latest
+
+    # =========================================================================
+    # PROBLEM: This line fires an approval gate whenever inputs.environment
+    # matches a protected environment name (e.g. 'prd').
+    # Called N×2 from the orchestrator → N×2 approval prompts.
+    #
+    # This line is INTENTIONALLY LEFT UNCHANGED in the solution.
+    # The fix is in the CALLER (account_deploy.yml) which passes 'prdv2'
+    # instead of 'prd'. Since 'prdv2' has no protection rules, no gate fires.
+    # The Resolve environment step below then maps prdv2 → prd internally.
+    # =========================================================================
+    environment: ${{ inputs.environment }}
+
+    # env block: deliberately does NOT set ENVIRONMENT or ENV_NAME here.
+    # If we set them from inputs.environment, they'd contain 'prdv2' for the
+    # new orchestrator path. The Resolve environment step sets them correctly.
+    env:
+      STACK_NAME: ${{ inputs.stack_name }}
+      ACCOUNT_GROUP: ${{ inputs.account_group }}
+      REF: ${{ inputs.ref }}
+
+    steps:
+
+      # =======================================================================
+      # SOLUTION STEP A — Resolve environment (must be the very first step)
+      #
+      # Maps the gate-bypass alias back to the real environment name.
+      # All steps below this one read $ENVIRONMENT (or env.ENVIRONMENT in if:)
+      # rather than ${{ inputs.environment }}.
+      #
+      # Backward compatible: for any input other than 'prdv2', RESOLVED == input.
+      # The 100+ existing callers that pass 'prd' directly get ENVIRONMENT=prd
+      # exactly as they did before this step existed.
+      # =======================================================================
+
+      # SOLUTION: uncomment this step
+      # - name: Resolve environment
+      #   run: |
+      #     RAW="${{ inputs.environment }}"
+      #     if [ "$RAW" = "prdv2" ]; then
+      #       RESOLVED="prd"
+      #     else
+      #       RESOLVED="$RAW"
+      #     fi
+      #     # Write to GITHUB_ENV so all subsequent steps see the resolved value
+      #     echo "ENVIRONMENT=$RESOLVED" >> "$GITHUB_ENV"
+      #     echo "ENV_NAME=$RESOLVED"    >> "$GITHUB_ENV"
+      #     echo "Resolved: '$RAW' → '$RESOLVED'"
+
+      # =======================================================================
+      # Without the solution, set ENVIRONMENT directly from inputs so the steps
+      # below work for the purpose of this demo (they'll contain 'prdv2' when
+      # called via the orchestrator path, which is exactly the bug).
+      # =======================================================================
+      - name: "Set ENVIRONMENT from input (PROBLEM version — remove when solution active)"
+        run: |
+          echo "ENVIRONMENT=${{ inputs.environment }}" >> "$GITHUB_ENV"
+          echo "ENV_NAME=${{ inputs.environment }}"    >> "$GITHUB_ENV"
+
+      # -----------------------------------------------------------------------
+      - name: "Show resolved context"
+        run: |
+          echo "## CDK Deploy Context" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Variable | Value |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| --- | --- |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| inputs.environment (raw) | ${{ inputs.environment }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| ENVIRONMENT (resolved)   | ${{ env.ENVIRONMENT }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| stack_name               | ${{ env.STACK_NAME }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| account_group            | ${{ env.ACCOUNT_GROUP }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| ref                      | ${{ env.REF }} |" >> "$GITHUB_STEP_SUMMARY"
+
+          # Highlight the bug vs the fix in the summary
+          if [ "${{ inputs.environment }}" = "prdv2" ] && [ "$ENVIRONMENT" = "prdv2" ]; then
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo "> ⚠️ **BUG VISIBLE**: ENVIRONMENT=prdv2 — CDK would receive wrong env name" >> "$GITHUB_STEP_SUMMARY"
+          elif [ "${{ inputs.environment }}" = "prdv2" ] && [ "$ENVIRONMENT" = "prd" ]; then
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo "> ✅ **SOLUTION ACTIVE**: inputs=prdv2 correctly resolved to ENVIRONMENT=prd" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      # -----------------------------------------------------------------------
+      - name: "Simulate CDK command"
+        run: |
+          echo "Running CDK deploy..."
+          echo "  cdk deploy --context environment=$ENVIRONMENT --context account_group=$ACCOUNT_GROUP $STACK_NAME"
+          echo ""
+          echo "CDK sees environment: $ENVIRONMENT  (must be 'prd' not 'prdv2')"
+
+      # -----------------------------------------------------------------------
+      # PROBLEM: This condition reads inputs.environment directly.
+      # When called via orchestrator with prdv2, it evaluates to false
+      # even for production — audit report is silently skipped.
+      #
+      # SOLUTION STEP B: change inputs.environment == 'prd'
+      #                  to    env.ENVIRONMENT    == 'prd'
+      # env context is available in step-level if: expressions.
+      # -----------------------------------------------------------------------
+      - name: "Simulate audit report (prd only)"
+        # PROBLEM version — will NOT run when called with prdv2:
+        if: inputs.environment == 'prd'
+        # SOLUTION: replace the line above with:
+        # if: env.ENVIRONMENT == 'prd'
+        run: |
+          echo "Generating audit report for production deployment"
+          echo "  Stack:   $STACK_NAME"
+          echo "  Account: $ACCOUNT_GROUP"
+          echo "  Env:     $ENVIRONMENT"
+
+      - name: "Simulate uat-or-prd step (install extra dependencies)"
+        # PROBLEM version — will NOT run when called with prdv2:
+        if: inputs.environment == 'prd' || inputs.environment == 'uat'
+        # SOLUTION: replace the line above with:
+        # if: env.ENVIRONMENT == 'prd' || env.ENVIRONMENT == 'uat'
+        run: |
+          echo "Installing production-grade dependencies..."
+          echo "  (This step is silently skipped in the PROBLEM version when env=prdv2)"
+
+      - name: "Simulate release note update (prd + tag only)"
+        # PROBLEM version:
+        if: inputs.environment == 'prd' && startsWith(github.ref, 'refs/tags/')
+        # SOLUTION:
+        # if: env.ENVIRONMENT == 'prd' && startsWith(github.ref, 'refs/tags/')
+        run: |
+          echo "Updating release notes for ${{ github.ref_name }}"
+
+      - name: "Simulate repo report update"
+        # PROBLEM version — will NOT run for prdv2 even though it should:
+        if: |
+          inputs.environment == 'prd' ||
+          inputs.environment == 'stg' ||
+          inputs.environment == 'tst'
+        # SOLUTION:
+        # if: |
+        #   env.ENVIRONMENT == 'prd' ||
+        #   env.ENVIRONMENT == 'stg' ||
+        #   env.ENVIRONMENT == 'tst'
+        run: |
+          echo "Updating repo report for environment: $ENVIRONMENT"
+
+      # -----------------------------------------------------------------------
+      - name: "Final summary"
+        run: |
+          echo "CDK deploy complete for $STACK_NAME in $ENVIRONMENT ($ACCOUNT_GROUP)"
