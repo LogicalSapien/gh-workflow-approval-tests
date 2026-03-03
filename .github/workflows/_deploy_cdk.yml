@@ -140,6 +140,73 @@ jobs:
             echo "> ✅ **SOLUTION ACTIVE**: inputs=prdv2 correctly resolved to ENVIRONMENT=prd" >> "$GITHUB_STEP_SUMMARY"
           fi
 
+      - name: Show caller info
+        run: |
+          echo "Workflow name     : ${{ github.workflow }}"
+          echo "Run ID            : ${{ github.run_id }}"
+          echo "Triggering actor  : ${{ github.actor }}"
+          echo "Triggering event  : ${{ github.event_name }}"
+
+
+      - name: Find caller workflow
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Get the current run's info — it contains the parent run ID
+          CURRENT_RUN=$(gh api /repos/${{ github.repository }}/actions/runs/${{ github.run_id }})
+      
+          # The triggering workflow is referenced here
+          TRIGGER_WORKFLOW=$(echo "$CURRENT_RUN" | jq -r '.triggering_actor.login')
+          REFERENCED_WORKFLOWS=$(echo "$CURRENT_RUN" | jq -r '.referenced_workflows[]?.path // "none"')
+      
+          echo "Triggered by user : $TRIGGER_WORKFLOW"
+          echo "Referenced workflows (callers):"
+          echo "$REFERENCED_WORKFLOWS"
+
+      - name: Show full caller chain
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh api /repos/${{ github.repository }}/actions/runs/${{ github.run_id }} \
+            --jq '
+              {
+                this_run_id:   .id,
+                this_workflow: .path,
+                caller_workflows: [
+                  .referenced_workflows[]? |
+                  {
+                    path: .path,
+                    ref:  .ref,
+                    sha:  .sha
+                  }
+                ]
+              }
+            '          
+
+      - name: Trace caller chain
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          echo "## Caller Chain" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Level | Workflow | Ref |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| --- | --- | --- |" >> "$GITHUB_STEP_SUMMARY"
+    
+          gh api /repos/${{ github.repository }}/actions/runs/${{ github.run_id }} \
+            --jq '.referenced_workflows[]? | "| caller | \(.path) | \(.ref) |"' \
+            >> "$GITHUB_STEP_SUMMARY"
+    
+          echo "| current | ${{ github.workflow }} | ${{ github.ref }} |" \
+            >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Trace caller (cross-repo aware)
+        env:
+          GH_TOKEN: ${{ secrets.PAT_GITHUB_TOKEN }}  # needs read access to both repos
+        run: |
+          # github.repository here is the repo where the CALLING workflow lives
+          # not where _deploy_cdk.yml is defined
+          gh api /repos/${{ github.repository }}/actions/runs/${{ github.run_id }} \
+            --jq '.referenced_workflows[] | .path'            
+
       # -----------------------------------------------------------------------
       - name: "Simulate CDK command"
         run: |
