@@ -96,28 +96,28 @@ jobs:
       # =======================================================================
 
       # SOLUTION: uncomment this step
-      # - name: Resolve environment
-      #   run: |
-      #     RAW="${{ inputs.environment }}"
-      #     if [ "$RAW" = "prdv2" ]; then
-      #       RESOLVED="prd"
-      #     else
-      #       RESOLVED="$RAW"
-      #     fi
-      #     # Write to GITHUB_ENV so all subsequent steps see the resolved value
-      #     echo "ENVIRONMENT=$RESOLVED" >> "$GITHUB_ENV"
-      #     echo "ENV_NAME=$RESOLVED"    >> "$GITHUB_ENV"
-      #     echo "Resolved: '$RAW' → '$RESOLVED'"
+      - name: Resolve environment
+        run: |
+          RAW="${{ inputs.environment }}"
+          if [ "$RAW" = "prdv2" ]; then
+            RESOLVED="prd"
+          else
+            RESOLVED="$RAW"
+          fi
+          # Write to GITHUB_ENV so all subsequent steps see the resolved value
+          echo "ENVIRONMENT=$RESOLVED" >> "$GITHUB_ENV"
+          echo "ENV_NAME=$RESOLVED"    >> "$GITHUB_ENV"
+          echo "Resolved: '$RAW' → '$RESOLVED'"
 
       # =======================================================================
       # Without the solution, set ENVIRONMENT directly from inputs so the steps
       # below work for the purpose of this demo (they'll contain 'prdv2' when
       # called via the orchestrator path, which is exactly the bug).
       # =======================================================================
-      - name: "Set ENVIRONMENT from input (PROBLEM version — remove when solution active)"
-        run: |
-          echo "ENVIRONMENT=${{ inputs.environment }}" >> "$GITHUB_ENV"
-          echo "ENV_NAME=${{ inputs.environment }}"    >> "$GITHUB_ENV"
+      # - name: "Set ENVIRONMENT from input (PROBLEM version — remove when solution active)"
+      #   run: |
+      #     echo "ENVIRONMENT=${{ inputs.environment }}" >> "$GITHUB_ENV"
+      #     echo "ENV_NAME=${{ inputs.environment }}"    >> "$GITHUB_ENV"
 
       # -----------------------------------------------------------------------
       - name: "Show resolved context"
@@ -159,9 +159,9 @@ jobs:
       # -----------------------------------------------------------------------
       - name: "Simulate audit report (prd only)"
         # PROBLEM version — will NOT run when called with prdv2:
-        if: inputs.environment == 'prd'
+        # if: inputs.environment == 'prd'
         # SOLUTION: replace the line above with:
-        # if: env.ENVIRONMENT == 'prd'
+        if: env.ENVIRONMENT == 'prd'
         run: |
           echo "Generating audit report for production deployment"
           echo "  Stack:   $STACK_NAME"
@@ -170,32 +170,32 @@ jobs:
 
       - name: "Simulate uat-or-prd step (install extra dependencies)"
         # PROBLEM version — will NOT run when called with prdv2:
-        if: inputs.environment == 'prd' || inputs.environment == 'uat'
+        # if: inputs.environment == 'prd' || inputs.environment == 'uat'
         # SOLUTION: replace the line above with:
-        # if: env.ENVIRONMENT == 'prd' || env.ENVIRONMENT == 'uat'
+        if: env.ENVIRONMENT == 'prd' || env.ENVIRONMENT == 'uat'
         run: |
           echo "Installing production-grade dependencies..."
           echo "  (This step is silently skipped in the PROBLEM version when env=prdv2)"
 
       - name: "Simulate release note update (prd + tag only)"
         # PROBLEM version:
-        if: inputs.environment == 'prd' && startsWith(github.ref, 'refs/tags/')
+        # if: inputs.environment == 'prd' && startsWith(github.ref, 'refs/tags/')
         # SOLUTION:
-        # if: env.ENVIRONMENT == 'prd' && startsWith(github.ref, 'refs/tags/')
+        if: env.ENVIRONMENT == 'prd' && startsWith(github.ref, 'refs/tags/')
         run: |
           echo "Updating release notes for ${{ github.ref_name }}"
 
       - name: "Simulate repo report update"
         # PROBLEM version — will NOT run for prdv2 even though it should:
-        if: |
-          inputs.environment == 'prd' ||
-          inputs.environment == 'stg' ||
-          inputs.environment == 'tst'
-        # SOLUTION:
         # if: |
-        #   env.ENVIRONMENT == 'prd' ||
-        #   env.ENVIRONMENT == 'stg' ||
-        #   env.ENVIRONMENT == 'tst'
+        #   inputs.environment == 'prd' ||
+        #   inputs.environment == 'stg' ||
+        #   inputs.environment == 'tst'
+        # SOLUTION:
+        if: |
+          env.ENVIRONMENT == 'prd' ||
+          env.ENVIRONMENT == 'stg' ||
+          env.ENVIRONMENT == 'tst'
         run: |
           echo "Updating repo report for environment: $ENVIRONMENT"
 
