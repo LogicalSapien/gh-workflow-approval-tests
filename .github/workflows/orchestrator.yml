@@ -82,7 +82,7 @@ jobs:
   approve-prod:
     name: "Gate: Approve production deployment"
     needs: build-matrix
-    if: contains(github.event.inputs.environments, 'prod')
+    if: contains(github.event.inputs.environments, 'prd')
     runs-on: ubuntu-latest
     environment: prd         # ← the ONE place the prod gate fires
     steps:
